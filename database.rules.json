@@ -1,0 +1,37 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "users": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid",
+        "transactions": {
+          "$transactionId": {
+            ".validate": "newData.hasChildren(['id', 'userId', 'type', 'amount', 'date']) && newData.child('userId').val() === $uid"
+          }
+        },
+        "accounts": {
+          "$accountId": {
+            ".validate": "newData.hasChildren(['id', 'userId', 'name']) && newData.child('userId').val() === $uid"
+          }
+        },
+        "budgets": {
+          "$budgetId": {
+            ".validate": "newData.hasChildren(['id', 'userId', 'category', 'allocatedAmount']) && newData.child('userId').val() === $uid"
+          }
+        },
+        "loans": {
+          "$loanId": {
+            ".validate": "newData.hasChildren(['id', 'userId', 'type', 'personName', 'amount']) && newData.child('userId').val() === $uid"
+          }
+        },
+        "due_payments": {
+          "$paymentId": {
+            ".validate": "newData.hasChildren(['id', 'dueId', 'userId', 'paymentAmount']) && newData.child('userId').val() === $uid"
+          }
+        }
+      }
+    }
+  }
+}

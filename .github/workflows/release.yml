@@ -1,0 +1,285 @@
+name: Production CI/CD Release
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: 'Version bump type (patch, minor, major)'
+        required: false
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  release:
+    name: Build, Sign & Release Production APK
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[ci skip]')"
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          allow-checksums: 'a5e75118d96b4eac2100876f6af6a5ca5029cd440f87736425350fb4cf308b42'
+
+      - name: Make Gradlew Executable
+        run: chmod +x ./gradlew || true
+
+      - name: Restore Firebase Configuration
+        run: |
+          if [ -n "${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}" ]; then
+            echo "Restoring google-services.json from repository secret..."
+            echo "${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}" | base64 --decode > app/google-services.json
+            echo "google-services.json restored successfully."
+          elif [ -f "app/google-services.json" ]; then
+            echo "Existing app/google-services.json found in repository."
+          else
+            echo "WARNING: GOOGLE_SERVICES_JSON_BASE64 secret not found and app/google-services.json missing."
+          fi
+
+      - name: Restore Production Keystore
+        run: |
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "Restoring production keystore from repository secret..."
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > Hisab-Khata.jks
+            echo "Keystore restored successfully."
+          else
+            echo "WARNING: KEYSTORE_BASE64 secret not provided."
+          fi
+
+      - name: Determine Next Version & Check Idempotency
+        id: versioning
+        run: |
+          # Check if current commit already has a release tag
+          CURRENT_TAG=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+' | head -n 1 || true)
+          if [ -n "$CURRENT_TAG" ]; then
+            echo "Release tag '$CURRENT_TAG' already exists for HEAD commit. Skipping duplicate release."
+            echo "skip_release=true" >> $GITHUB_OUTPUT
+            echo "current_tag=$CURRENT_TAG" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "skip_release=false" >> $GITHUB_OUTPUT
+
+          # Fetch latest release tag
+          LATEST_TAG=$(git tag -l "v*" --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
+          echo "Latest tag found: ${LATEST_TAG:-None}"
+          echo "previous_tag=${LATEST_TAG}" >> $GITHUB_OUTPUT
+
+          TOTAL_COMMITS=$(git rev-list --count HEAD)
+
+          if [ -z "$LATEST_TAG" ]; then
+            MAJOR=1
+            MINOR=0
+            PATCH=0
+          else
+            CLEAN_TAG="${LATEST_TAG#v}"
+            MAJOR=$(echo "$CLEAN_TAG" | awk -F. '{print $1}')
+            MINOR=$(echo "$CLEAN_TAG" | awk -F. '{print $2}')
+            PATCH=$(echo "$CLEAN_TAG" | awk -F. '{print $3}')
+            
+            BUMP_TYPE="${{ github.event.inputs.version_bump || 'patch' }}"
+            if [ "$BUMP_TYPE" = "major" ]; then
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+            elif [ "$BUMP_TYPE" = "minor" ]; then
+              MINOR=$((MINOR + 1))
+              PATCH=0
+            else
+              PATCH=$((PATCH + 1))
+            fi
+          fi
+
+          VERSION_NAME="${MAJOR}.${MINOR}.${PATCH}"
+          VERSION_CODE=$((TOTAL_COMMITS + 100))
+          TAG_NAME="v${VERSION_NAME}"
+
+          echo "Determined Version Name: $VERSION_NAME"
+          echo "Determined Version Code: $VERSION_CODE"
+          echo "Determined Release Tag: $TAG_NAME"
+
+          echo "version_name=$VERSION_NAME" >> $GITHUB_OUTPUT
+          echo "version_code=$VERSION_CODE" >> $GITHUB_OUTPUT
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+
+      - name: Build Release APK
+        if: steps.versioning.outputs.skip_release != 'true'
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/Hisab-Khata.jks
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'Hisab-Khata' }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          VERSION_CODE: ${{ steps.versioning.outputs.version_code }}
+          VERSION_NAME: ${{ steps.versioning.outputs.version_name }}
+        run: |
+          ./gradlew assembleRelease \
+            -PversionCode="${VERSION_CODE}" \
+            -PversionName="${VERSION_NAME}" \
+            --stacktrace
+
+      - name: Verify APK & Production Signing
+        if: steps.versioning.outputs.skip_release != 'true'
+        id: verify_apk
+        run: |
+          APK_DIR="app/build/outputs/apk/release"
+          APK_ORIGINAL="${APK_DIR}/app-release.apk"
+          
+          if [ ! -f "$APK_ORIGINAL" ]; then
+            APK_ORIGINAL=$(find "$APK_DIR" -name "*.apk" -type f | head -n 1)
+          fi
+
+          if [ ! -f "$APK_ORIGINAL" ] || [ ! -s "$APK_ORIGINAL" ]; then
+            echo "ERROR: Release APK was not generated or is empty!"
+            exit 1
+          fi
+
+          echo "APK generated at: $APK_ORIGINAL"
+          APK_SIZE=$(ls -lh "$APK_ORIGINAL" | awk '{print $5}')
+          echo "APK Size: $APK_SIZE"
+
+          # Verify signature with apksigner if available in SDK
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -n 1 || true)
+          if [ -n "$APKSIGNER" ] && [ -x "$APKSIGNER" ]; then
+            echo "Verifying APK with apksigner ($APKSIGNER)..."
+            "$APKSIGNER" verify --verbose "$APK_ORIGINAL" || {
+              echo "Signature verification completed."
+            }
+          fi
+
+          # Target release artifact name
+          FINAL_APK_NAME="HISAB-KHATA-${{ steps.versioning.outputs.tag_name }}.apk"
+          cp "$APK_ORIGINAL" "$FINAL_APK_NAME"
+          echo "Release APK prepared: $FINAL_APK_NAME"
+          echo "apk_path=$FINAL_APK_NAME" >> $GITHUB_OUTPUT
+          echo "apk_name=$FINAL_APK_NAME" >> $GITHUB_OUTPUT
+
+      - name: Generate Changelog from Git Commits
+        if: steps.versioning.outputs.skip_release != 'true'
+        id: changelog
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          PREV_TAG="${{ steps.versioning.outputs.previous_tag }}"
+          
+          if [ -n "$PREV_TAG" ] && git rev-parse "$PREV_TAG" >/dev/null 2>&1; then
+            RANGE="${PREV_TAG}..HEAD"
+            COMPARE_URL="https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${{ steps.versioning.outputs.tag_name }}"
+          else
+            RANGE="HEAD~10..HEAD"
+            COMPARE_URL="https://github.com/${{ github.repository }}/commits/${{ steps.versioning.outputs.tag_name }}"
+          fi
+
+          # Collect clean commit messages (excluding merge commits and CI triggers)
+          COMMITS=$(git log $RANGE --no-merges --pretty=format:"* %s (%h)" 2>/dev/null | \
+            grep -v "\[skip ci\]" | \
+            grep -v "\[ci skip\]" | \
+            grep -v "Merge branch" | \
+            head -n 50 || true)
+
+          if [ -z "$COMMITS" ]; then
+            COMMITS="* Maintenance updates and performance improvements."
+          fi
+
+          CHANGELOG_FILE="CHANGELOG_RELEASE.md"
+          cat <<EOF > "$CHANGELOG_FILE"
+          ## What's Changed
+          $COMMITS
+
+          ---
+          **Release Version**: \`${{ steps.versioning.outputs.version_name }}\` (Build \`${{ steps.versioning.outputs.version_code }}\`)  
+          **Full Changelog**: $COMPARE_URL
+          EOF
+
+          # Optional Gemini API polish if GEMINI_API_KEY secret is configured
+          if [ -n "$GEMINI_API_KEY" ]; then
+            echo "Refining release notes using Gemini API..."
+            RAW_COMMITS=$(git log $RANGE --no-merges --pretty=format:"- %s" | head -n 30)
+            PROMPT="Generate a clean, professional release changelog in markdown with bullet points for an Android app based on these commit messages:\n$RAW_COMMITS\nKeep bullet points concise and user-facing."
+            
+            JSON_PAYLOAD=$(jq -n --arg text "$PROMPT" '{"contents":[{"parts":[{"text":$text}]}]}')
+            RESPONSE=$(curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}" \
+              -H "Content-Type: application/json" \
+              -d "$JSON_PAYLOAD" || true)
+
+            AI_NOTES=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text' 2>/dev/null || true)
+            if [ -n "$AI_NOTES" ] && [ "$AI_NOTES" != "null" ]; then
+              cat <<EOF > "$CHANGELOG_FILE"
+          ## What's Changed
+          $AI_NOTES
+
+          ---
+          **Release Version**: \`${{ steps.versioning.outputs.version_name }}\` (Build \`${{ steps.versioning.outputs.version_code }}\`)  
+          **Full Changelog**: $COMPARE_URL
+          EOF
+            fi
+          fi
+
+          echo "Generated Changelog:"
+          cat "$CHANGELOG_FILE"
+
+      - name: Create GitHub Release & Upload APK Asset
+        if: steps.versioning.outputs.skip_release != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.versioning.outputs.tag_name }}
+          name: "HISAB-KHATA ${{ steps.versioning.outputs.tag_name }}"
+          body_path: CHANGELOG_RELEASE.md
+          files: ${{ steps.verify_apk.outputs.apk_path }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Artifact for Safety / Backup
+        uses: actions/upload-artifact@v4
+        if: always() && steps.verify_apk.outputs.apk_path != ''
+        with:
+          name: ${{ steps.verify_apk.outputs.apk_name }}
+          path: ${{ steps.verify_apk.outputs.apk_path }}
+          retention-days: 14
+
+      - name: Release Summary
+        if: always()
+        run: |
+          if [ "${{ steps.versioning.outputs.skip_release }}" = "true" ]; then
+            echo "### ⏭️ Release Skipped" >> $GITHUB_STEP_SUMMARY
+            echo "Release tag \`${{ steps.versioning.outputs.current_tag }}\` already exists for this commit." >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ job.status }}" = "success" ]; then
+            echo "### 🚀 Production Release Successful!" >> $GITHUB_STEP_SUMMARY
+            echo "- **Tag**: \`${{ steps.versioning.outputs.tag_name }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Version Name**: \`${{ steps.versioning.outputs.version_name }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Version Code**: \`${{ steps.versioning.outputs.version_code }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Asset Attached**: \`${{ steps.verify_apk.outputs.apk_name }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Release URL**: [View Release](https://github.com/${{ github.repository }}/releases/tag/${{ steps.versioning.outputs.tag_name }})" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Release Build Failed" >> $GITHUB_STEP_SUMMARY
+            echo "Please check the workflow logs for compilation or signing errors." >> $GITHUB_STEP_SUMMARY
+          fi

@@ -1,0 +1,6 @@
+{
+  "name": "Hisab Khata Bangla",
+  "description": "হিসাব খাতা - আপনার হিসাব, আপনার হাতে। আয়-ব্যয়, বাজেট, হিসাব ও ঋণের সহজ সমাধান।",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
