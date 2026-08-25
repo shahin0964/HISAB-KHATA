@@ -99,6 +99,32 @@ interface HisabDao {
     @Query("SELECT * FROM due_payments WHERE id = :id AND userId = :userId LIMIT 1")
     suspend fun getDuePaymentById(id: String, userId: String): DuePaymentEntity?
 
+    // Saving Goals
+    @Query("SELECT * FROM saving_goals WHERE userId = :userId ORDER BY createdAt DESC")
+    fun getSavingGoalsByUser(userId: String): Flow<List<SavingGoalEntity>>
+
+    @Query("SELECT * FROM saving_goals WHERE userId = :userId ORDER BY createdAt DESC")
+    suspend fun getSavingGoalsListByUser(userId: String): List<SavingGoalEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertSavingGoal(goal: SavingGoalEntity)
+
+    @Query("DELETE FROM saving_goals WHERE id = :id AND userId = :userId")
+    suspend fun deleteSavingGoal(id: String, userId: String)
+
+    // Reminders
+    @Query("SELECT * FROM reminders WHERE userId = :userId ORDER BY timestamp DESC")
+    fun getRemindersByUser(userId: String): Flow<List<ReminderEntity>>
+
+    @Query("SELECT * FROM reminders WHERE userId = :userId ORDER BY timestamp DESC")
+    suspend fun getRemindersListByUser(userId: String): List<ReminderEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertReminder(reminder: ReminderEntity)
+
+    @Query("DELETE FROM reminders WHERE id = :id AND userId = :userId")
+    suspend fun deleteReminder(id: String, userId: String)
+
     // Sync Queue Methods
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSyncQueue(item: SyncQueueEntity)

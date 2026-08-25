@@ -5,6 +5,8 @@ import com.example.data.local.BudgetEntity
 import com.example.data.local.DuePaymentEntity
 import com.example.data.local.HisabDao
 import com.example.data.local.LoanEntity
+import com.example.data.local.ReminderEntity
+import com.example.data.local.SavingGoalEntity
 import com.example.data.local.SyncQueueEntity
 import com.example.data.local.TransactionEntity
 import com.example.data.sync.FirebaseSyncManager
@@ -284,6 +286,72 @@ class HisabRepository(
                 dao.deleteSyncQueueItem(queueId)
             }
         }
+    }
+
+    // Saving Goals
+    fun getSavingGoals(userId: String): Flow<List<SavingGoalEntity>> {
+        return dao.getSavingGoalsByUser(userId)
+    }
+
+    suspend fun addSavingGoal(goal: SavingGoalEntity) {
+        dao.insertSavingGoal(goal)
+        val queueId = "SAVING_GOAL_${goal.id}"
+        dao.insertSyncQueue(
+            SyncQueueEntity(
+                id = queueId,
+                userId = goal.userId,
+                entityType = "SAVING_GOAL",
+                entityId = goal.id,
+                operation = "UPSERT"
+            )
+        )
+    }
+
+    suspend fun deleteSavingGoal(id: String, userId: String) {
+        dao.deleteSavingGoal(id, userId)
+        val queueId = "SAVING_GOAL_$id"
+        dao.insertSyncQueue(
+            SyncQueueEntity(
+                id = queueId,
+                userId = userId,
+                entityType = "SAVING_GOAL",
+                entityId = id,
+                operation = "DELETE"
+            )
+        )
+    }
+
+    // Reminders
+    fun getReminders(userId: String): Flow<List<ReminderEntity>> {
+        return dao.getRemindersByUser(userId)
+    }
+
+    suspend fun addReminder(reminder: ReminderEntity) {
+        dao.insertReminder(reminder)
+        val queueId = "REMINDER_${reminder.id}"
+        dao.insertSyncQueue(
+            SyncQueueEntity(
+                id = queueId,
+                userId = reminder.userId,
+                entityType = "REMINDER",
+                entityId = reminder.id,
+                operation = "UPSERT"
+            )
+        )
+    }
+
+    suspend fun deleteReminder(id: String, userId: String) {
+        dao.deleteReminder(id, userId)
+        val queueId = "REMINDER_$id"
+        dao.insertSyncQueue(
+            SyncQueueEntity(
+                id = queueId,
+                userId = userId,
+                entityType = "REMINDER",
+                entityId = id,
+                operation = "DELETE"
+            )
+        )
     }
 
     // Sync Queue Observations

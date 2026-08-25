@@ -12,9 +12,11 @@ import androidx.room.RoomDatabase
         BudgetEntity::class,
         LoanEntity::class,
         DuePaymentEntity::class,
-        SyncQueueEntity::class
+        SyncQueueEntity::class,
+        SavingGoalEntity::class,
+        ReminderEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

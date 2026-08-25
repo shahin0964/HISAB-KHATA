@@ -52,6 +52,7 @@ fun HisabKhataApp(viewModel: HisabViewModel = viewModel()) {
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
 
     var showQuickAddMenu by remember { mutableStateOf(false) }
+    var showHisabAiDialog by remember { mutableStateOf(false) }
 
     val totalBalance by viewModel.totalBalance.collectAsStateWithLifecycle()
     val totalIncome by viewModel.totalIncome.collectAsStateWithLifecycle()
@@ -91,6 +92,30 @@ fun HisabKhataApp(viewModel: HisabViewModel = viewModel()) {
         )
     }
 
+    if (showHisabAiDialog) {
+        com.example.ui.components.HisabAiDialog(
+            onDismissRequest = { showHisabAiDialog = false },
+            onConfirmSave = { type, category, amount, date, time, description, accountName ->
+                viewModel.addTransaction(
+                    type = type,
+                    category = category,
+                    amount = amount,
+                    date = date,
+                    time = time,
+                    description = description,
+                    accountName = accountName
+                ) {}
+            },
+            onConfirmAction = { action, onSuccess, onError ->
+                viewModel.executeAiAction(action, onSuccess, onError)
+            },
+            transactions = transactions,
+            accounts = accounts,
+            loans = loans,
+            budgets = budgets
+        )
+    }
+
     val handleAddClick = {
         if (isGuestMode) {
             viewModel.triggerGuestRestriction()
@@ -115,6 +140,18 @@ fun HisabKhataApp(viewModel: HisabViewModel = viewModel()) {
                 androidx.compose.foundation.layout.Column(
                     verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)
                 ) {
+                    androidx.compose.material3.Button(
+                        onClick = {
+                            showQuickAddMenu = false
+                            if (isGuestMode) viewModel.triggerGuestRestriction() else showHisabAiDialog = true
+                        },
+                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = com.example.ui.theme.PrimaryBlue),
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth().height(40.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        androidx.compose.material3.Text("✨ হিসাব AI (ভয়েস বা টাইপ)", fontSize = 13.sp, color = androidx.compose.ui.graphics.Color.White, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                    }
                     androidx.compose.material3.Button(
                         onClick = {
                             showQuickAddMenu = false
@@ -329,6 +366,7 @@ fun HisabKhataApp(viewModel: HisabViewModel = viewModel()) {
                             "accounts" -> navController.navigate("accounts")
                             "reports" -> navController.navigate("reports")
                             "loans" -> navController.navigate("loans")
+                            "more", "aro" -> navController.navigate("aro")
                             else -> navController.navigate("profile")
                         }
                     },
@@ -338,6 +376,9 @@ fun HisabKhataApp(viewModel: HisabViewModel = viewModel()) {
                     },
                     onAddExpenseClick = {
                         if (isGuestMode) viewModel.triggerGuestRestriction() else navController.navigate("add_expense")
+                    },
+                    onHisabAiClick = {
+                        if (isGuestMode) viewModel.triggerGuestRestriction() else showHisabAiDialog = true
                     },
                     modifier = Modifier.padding(padding)
                 )
@@ -494,6 +535,45 @@ fun HisabKhataApp(viewModel: HisabViewModel = viewModel()) {
                     modifier = Modifier.padding(padding)
                 )
             }
+        }
+
+        composable("aro") {
+            MainScaffold(
+                selectedRoute = "aro",
+                onNavigate = { route ->
+                    if (route != "aro") navController.navigate(route)
+                },
+                onAddClick = handleAddClick
+            ) { padding ->
+                AroScreen(
+                    onBackClick = { navController.popBackStack() },
+                    onScannerClick = { navController.navigate("scanner") },
+                    onHisabAiClick = {
+                        if (isGuestMode) viewModel.triggerGuestRestriction() else showHisabAiDialog = true
+                    },
+                    onQuickActionClick = { route ->
+                        when (route) {
+                            "add_income" -> if (isGuestMode) viewModel.triggerGuestRestriction() else navController.navigate("add_income")
+                            "add_expense" -> if (isGuestMode) viewModel.triggerGuestRestriction() else navController.navigate("add_expense")
+                            "transactions" -> navController.navigate("transactions")
+                            "budget" -> navController.navigate("budget")
+                            "accounts" -> navController.navigate("accounts")
+                            "reports" -> navController.navigate("reports")
+                            "loans" -> navController.navigate("loans")
+                            "profile" -> navController.navigate("profile")
+                            else -> {}
+                        }
+                    },
+                    modifier = Modifier.padding(padding)
+                )
+            }
+        }
+
+        composable("scanner") {
+            ScannerScreen(
+                onBackClick = { navController.popBackStack() },
+                onSaveSuccess = { navController.popBackStack() }
+            )
         }
     }
 }

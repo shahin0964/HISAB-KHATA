@@ -3,16 +3,21 @@ package com.example.ui.viewmodel
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.ai.HisabActionEngine
+import com.example.data.ai.StructuredHisabAction
 import com.example.data.auth.AuthManager
 import com.example.data.auth.User
 import com.example.data.local.AccountEntity
 import com.example.data.local.AppDatabase
 import com.example.data.local.BudgetEntity
 import com.example.data.local.LoanEntity
+import com.example.data.local.ReminderEntity
+import com.example.data.local.SavingGoalEntity
 import com.example.data.local.TransactionEntity
 import com.example.data.repository.HisabRepository
 import com.example.data.local.ThemePreferences
 import com.example.utils.NetworkMonitor
+import com.example.utils.ReminderScheduler
 import com.example.ui.theme.AppThemeMode
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -120,6 +125,22 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
     val duePayments: StateFlow<List<com.example.data.local.DuePaymentEntity>> = currentUser
         .flatMapLatest { user ->
             if (user != null) repository.getDuePayments(user.uid)
+            else flowOf(emptyList())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val savingGoals: StateFlow<List<SavingGoalEntity>> = currentUser
+        .flatMapLatest { user ->
+            if (user != null) repository.getSavingGoals(user.uid)
+            else flowOf(emptyList())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val reminders: StateFlow<List<ReminderEntity>> = currentUser
+        .flatMapLatest { user ->
+            if (user != null) repository.getReminders(user.uid)
             else flowOf(emptyList())
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -575,6 +596,235 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             repository.deleteDuePayment(id, user.uid)
             _uiEvent.emit("পেমেন্ট রসিদ রেকর্ড মুছে ফেলা হয়েছে")
+        }
+    }
+
+    // Saving Goals Actions
+    fun addSavingGoal(title: String, amount: Double, onSuccess: () -> Unit = {}) {
+        val user = currentUser.value
+        if (_isGuestMode.value || user == null) {
+            triggerGuestRestriction()
+            return
+        }
+        if (amount <= 0) {
+            viewModelScope.launch { _uiEvent.emit("সঠিক সঞ্চয়ের পরিমাণ লিখুন") }
+            return
+        }
+        val goal = SavingGoalEntity(
+            id = UUID.randomUUID().toString(),
+            userId = user.uid,
+            title = if (title.isBlank()) "সঞ্চয়" else title,
+            targetAmount = amount,
+            savedAmount = 0.0
+        )
+        viewModelScope.launch {
+            repository.addSavingGoal(goal)
+            _uiEvent.emit("সঞ্চয় Goal সফলভাবে তৈরি হয়েছে")
+            onSuccess()
+        }
+    }
+
+    fun deleteSavingGoal(id: String) {
+        val user = currentUser.value
+        if (_isGuestMode.value || user == null) {
+            triggerGuestRestriction()
+            return
+        }
+        viewModelScope.launch {
+            repository.deleteSavingGoal(id, user.uid)
+            _uiEvent.emit("সঞ্চয় Goal মুছে ফেলা হয়েছে")
+        }
+    }
+
+    // Reminder Actions
+    fun addReminder(
+        title: String,
+        type: String = "REMINDER",
+        amount: Double? = null,
+        personName: String = "",
+        date: String = "আগামীকাল",
+        time: String = "সকাল ১০:০০",
+        dueDay: Int? = null,
+        recurrence: String = "ONCE",
+        onSuccess: () -> Unit = {}
+    ) {
+        val user = currentUser.value
+        if (_isGuestMode.value || user == null) {
+            triggerGuestRestriction()
+            return
+        }
+        val reminderId = UUID.randomUUID().toString()
+        val reminder = ReminderEntity(
+            id = reminderId,
+            userId = user.uid,
+            title = title,
+            type = type,
+            amount = amount,
+            personName = personName,
+            date = date,
+            time = time,
+            dueDay = dueDay,
+            recurrence = recurrence
+        )
+        viewModelScope.launch {
+            repository.addReminder(reminder)
+            // Schedule notification
+            if (type == "EMI" && dueDay != null) {
+                val amtStr = if (amount != null && amount > 0) HisabActionEngine.formatBengaliCurrency(amount) else ""
+                ReminderScheduler.scheduleMonthlyEmi(
+                    context = getApplication(),
+                    emiId = reminderId,
+                    title = "🔔 EMI Reminder",
+                    message = "আজ $title $amtStr দেওয়ার সময়।",
+                    dueDay = dueDay
+                )
+            } else {
+                val amtStr = if (amount != null && amount > 0) " (${HisabActionEngine.formatBengaliCurrency(amount)})" else ""
+                ReminderScheduler.scheduleReminder(
+                    context = getApplication(),
+                    reminderId = reminderId,
+                    title = "🔔 হিসাব খাতা রিমাইন্ডার",
+                    message = "$title$amtStr - $date $time",
+                    triggerTimeMillis = System.currentTimeMillis() + (60 * 1000) // Default active trigger or alarm
+                )
+            }
+            _uiEvent.emit("রিমাইন্ডার সফলভাবে সেট করা হয়েছে")
+            onSuccess()
+        }
+    }
+
+    fun deleteReminder(id: String) {
+        val user = currentUser.value
+        if (_isGuestMode.value || user == null) {
+            triggerGuestRestriction()
+            return
+        }
+        viewModelScope.launch {
+            repository.deleteReminder(id, user.uid)
+            _uiEvent.emit("রিমাইন্ডার মুছে ফেলা হয়েছে")
+        }
+    }
+
+    // Step 3: AI Action & Automation Execution
+    fun executeAiAction(
+        action: StructuredHisabAction,
+        onSuccess: (String) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val user = currentUser.value
+        if (_isGuestMode.value || user == null) {
+            triggerGuestRestriction()
+            onError("অ্যাকশন সম্পাদনের জন্য লগইন করা আবশ্যক")
+            return
+        }
+
+        val sdf = java.text.SimpleDateFormat("dd MMM, yyyy", java.util.Locale("bn"))
+        val todayStr = sdf.format(java.util.Date())
+
+        when (action.action) {
+            "CREATE_SAVING_GOAL" -> {
+                val amt = action.amount ?: 0.0
+                if (amt <= 0) {
+                    onError("সঞ্চয়ের সঠিক পরিমাণ উল্লেখ করুন")
+                    return
+                }
+                val goalTitle = action.title ?: "সঞ্চয়"
+                addSavingGoal(goalTitle, amt) {
+                    val formatted = HisabActionEngine.formatBengaliCurrency(amt)
+                    onSuccess("$formatted সঞ্চয় goal তৈরি করা হয়েছে।")
+                }
+            }
+            "CREATE_BUDGET" -> {
+                val amt = action.amount ?: 0.0
+                if (amt <= 0) {
+                    onError("বাজেটের সঠিক পরিমাণ উল্লেখ করুন")
+                    return
+                }
+                val category = action.category ?: "মোট বাজেট"
+                addBudget(category, amt) {
+                    val formatted = HisabActionEngine.formatBengaliCurrency(amt)
+                    val msg = if (action.category != null) {
+                        "ঠিক আছে। ‘${action.category}’-এর জন্য $formatted budget তৈরি হয়েছে।"
+                    } else {
+                        "ঠিক আছে। এই মাসের জন্য $formatted budget তৈরি হয়েছে।"
+                    }
+                    onSuccess(msg)
+                }
+            }
+            "CREATE_RECEIVABLE" -> {
+                val amt = action.amount ?: 0.0
+                val person = action.person ?: "অজ্ঞাত ব্যক্তি"
+                if (amt <= 0) {
+                    onError("পাওনার সঠিক পরিমাণ উল্লেখ করুন")
+                    return
+                }
+                addLoan(
+                    type = "RECEIVABLE",
+                    personName = person,
+                    amount = amt,
+                    date = todayStr,
+                    note = action.rawText
+                ) {
+                    val formatted = HisabActionEngine.formatBengaliCurrency(amt)
+                    onSuccess("${person}-এর কাছে $formatted পাওনা যোগ করা হয়েছে।")
+                }
+            }
+            "CREATE_PAYABLE" -> {
+                val amt = action.amount ?: 0.0
+                val person = action.person ?: "অজ্ঞাত ব্যক্তি"
+                if (amt <= 0) {
+                    onError("দেনার সঠিক পরিমাণ উল্লেখ করুন")
+                    return
+                }
+                addLoan(
+                    type = "PAYABLE",
+                    personName = person,
+                    amount = amt,
+                    date = todayStr,
+                    note = action.rawText
+                ) {
+                    val formatted = HisabActionEngine.formatBengaliCurrency(amt)
+                    onSuccess("${person}-কে $formatted দেওয়ার দেনা যোগ করা হয়েছে।")
+                }
+            }
+            "CREATE_EMI" -> {
+                val amt = action.amount
+                if (amt == null || amt <= 0) {
+                    onError("EMI-এর পরিমাণ কত?")
+                    return
+                }
+                val dueDay = action.dueDay ?: 5
+                val title = action.title ?: "EMI"
+                addReminder(
+                    title = title,
+                    type = "EMI",
+                    amount = amt,
+                    dueDay = dueDay,
+                    recurrence = "MONTHLY"
+                ) {
+                    val formatted = HisabActionEngine.formatBengaliCurrency(amt)
+                    val benDay = HisabActionEngine.convertToBengaliDigits(dueDay.toString())
+                    onSuccess("প্রতি মাসের $benDay তারিখে $formatted টাকার Monthly EMI reminder সেট করা হয়েছে।")
+                }
+            }
+            "CREATE_REMINDER" -> {
+                val title = action.title ?: action.rawText
+                val date = action.date ?: "আগামীকাল"
+                val time = action.time ?: "সকাল ১০:০০"
+                addReminder(
+                    title = title,
+                    type = "REMINDER",
+                    amount = action.amount,
+                    date = date,
+                    time = time,
+                    recurrence = "ONCE"
+                ) {
+                    onSuccess("$date $time-এর reminder সেট করা হয়েছে।")
+                }
+            }
+            else -> {
+                onError("অ্যাকশনটি বুঝতে পারিনি।")
+            }
         }
     }
 }

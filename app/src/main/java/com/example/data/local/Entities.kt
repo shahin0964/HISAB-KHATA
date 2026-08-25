@@ -75,8 +75,36 @@ data class DuePaymentEntity(
 data class SyncQueueEntity(
     @PrimaryKey val id: String, // e.g. "TRANSACTION_${entityId}"
     val userId: String,
-    val entityType: String, // "TRANSACTION", "ACCOUNT", "BUDGET", "LOAN", "DUE_PAYMENT"
+    val entityType: String, // "TRANSACTION", "ACCOUNT", "BUDGET", "LOAN", "DUE_PAYMENT", "SAVING_GOAL", "REMINDER"
     val entityId: String,
     val operation: String, // "UPSERT" or "DELETE"
     val timestamp: Long = System.currentTimeMillis()
 )
+
+@Entity(tableName = "saving_goals")
+data class SavingGoalEntity(
+    @PrimaryKey val id: String,
+    val userId: String,
+    val title: String,
+    val targetAmount: Double,
+    val savedAmount: Double = 0.0,
+    val targetDate: String = "",
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "reminders")
+data class ReminderEntity(
+    @PrimaryKey val id: String,
+    val userId: String,
+    val title: String,
+    val type: String, // "REMINDER", "EMI"
+    val amount: Double? = null,
+    val personName: String = "",
+    val date: String = "",
+    val time: String = "",
+    val dueDay: Int? = null,
+    val recurrence: String = "ONCE", // "ONCE", "MONTHLY"
+    val isCompleted: Boolean = false,
+    val timestamp: Long = System.currentTimeMillis()
+)
+

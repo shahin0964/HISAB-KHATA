@@ -50,6 +50,7 @@ fun HomeScreen(
     onSeeAllTransactionsClick: () -> Unit,
     onAddIncomeClick: () -> Unit,
     onAddExpenseClick: () -> Unit,
+    onHisabAiClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val colors = LocalAppColors.current
@@ -198,6 +199,87 @@ fun HomeScreen(
                     }
                 }
 
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            // Hisab AI Banner Feature Card
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .shadow(3.dp, RoundedCornerShape(14.dp))
+                        .clickable { onHisabAiClick?.invoke() }
+                        .testTag("hisab_ai_home_card"),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (colors.isBlack) Color(0xFF1E293B) else Color(0xFFEFF6FF)
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .background(PrimaryBlue, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.AutoAwesome,
+                                    contentDescription = "Hisab AI",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = "হিসাব AI",
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = colors.textPrimary
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Surface(
+                                        color = PrimaryBlue.copy(alpha = 0.15f),
+                                        shape = RoundedCornerShape(4.dp)
+                                    ) {
+                                        Text(
+                                            text = "স্মার্ট",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = PrimaryBlue,
+                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                        )
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "বাংলায় কথা বলুন বা টাইপ করে হিসাব রাখুন",
+                                    fontSize = 12.sp,
+                                    color = colors.textMuted,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                        Icon(
+                            imageVector = Icons.Default.Mic,
+                            contentDescription = "Voice Input",
+                            tint = PrimaryBlue,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
                 Spacer(modifier = Modifier.height(14.dp))
             }
 
