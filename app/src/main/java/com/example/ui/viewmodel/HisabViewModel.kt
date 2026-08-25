@@ -4,6 +4,9 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.ai.HisabActionEngine
+import com.example.data.ai.HisabInsightEngine
+import com.example.data.ai.InsightPriority
+import com.example.data.ai.SmartInsight
 import com.example.data.ai.StructuredHisabAction
 import com.example.data.auth.AuthManager
 import com.example.data.auth.User
@@ -27,11 +30,15 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 
 class HisabViewModel(application: Application) : AndroidViewModel(application) {
@@ -205,6 +212,51 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
     val totalOwed: StateFlow<Double> = loans
         .map { list -> list.filter { (it.type == "OWED" || it.type == "PAYABLE") && !it.isPaid }.sumOf { it.currentBalance } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0.0)
+
+    @Suppress("UNCHECKED_CAST")
+    val smartInsights: StateFlow<List<SmartInsight>> = combine(
+        listOf(transactions, accounts, loans, budgets, savingGoals, reminders, currentUser)
+    ) { args ->
+        val tx = args[0] as List<TransactionEntity>
+        val acc = args[1] as List<AccountEntity>
+        val ln = args[2] as List<LoanEntity>
+        val bg = args[3] as List<BudgetEntity>
+        val sg = args[4] as List<SavingGoalEntity>
+        val rem = args[5] as List<ReminderEntity>
+        val user = args[6] as? com.example.data.auth.User
+        HisabInsightEngine.generateInsights(
+            transactions = tx,
+            accounts = acc,
+            loans = ln,
+            budgets = bg,
+            savingGoals = sg,
+            reminders = rem,
+            activeUserId = user?.uid
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val notifiedInsightKeys = mutableSetOf<String>()
+
+    fun checkAndNotifyProactiveInsights() {
+        val user = currentUser.value ?: return
+        val currentInsights = smartInsights.value
+        val criticalOrHigh = currentInsights.filter { it.priority == InsightPriority.CRITICAL || it.priority == InsightPriority.HIGH }
+        val dateStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+
+        for (insight in criticalOrHigh) {
+            val key = "${user.uid}_${insight.type}_${insight.category ?: ""}_$dateStr"
+            if (!notifiedInsightKeys.contains(key)) {
+                notifiedInsightKeys.add(key)
+                ReminderScheduler.scheduleReminder(
+                    context = getApplication(),
+                    reminderId = "INSIGHT_${insight.id.hashCode()}",
+                    title = insight.title,
+                    message = insight.messageBangla,
+                    triggerTimeMillis = System.currentTimeMillis() + 1500L
+                )
+            }
+        }
+    }
 
     fun toggleBalanceVisibility() {
         _isBalanceVisible.value = !_isBalanceVisible.value

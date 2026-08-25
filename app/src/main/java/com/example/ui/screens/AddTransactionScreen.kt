@@ -11,6 +11,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessTime
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CalendarToday
 import androidx.compose.material.icons.filled.Edit
@@ -18,6 +19,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -337,19 +339,61 @@ fun AddTransactionScreen(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Description Input
-            Text(text = "বিবরণ (ঐচ্ছিক)", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = colors.textPrimary)
-            Spacer(modifier = Modifier.height(4.dp))
-            OutlinedTextField(
-                value = description,
-                onValueChange = { description = it },
-                textStyle = customInputTextStyle,
-                colors = customInputTextFieldColors(),
-                placeholder = { Text("মাসিক বেতন / বাজার খরচ", fontSize = 14.sp, color = colors.textMuted) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().testTag("description_input"),
-                shape = RoundedCornerShape(10.dp)
-            )
+            // 'আরও লিখুন' (Additional Writing / Description) Option
+            var isMoreWritingExpanded by remember { mutableStateOf(description.isNotBlank()) }
+
+            if (!isMoreWritingExpanded && description.isBlank()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { isMoreWritingExpanded = true }
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "আরও লিখুন",
+                        tint = primaryColor,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "আরও লিখুন",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = primaryColor
+                    )
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(text = "আরও লিখুন (বিবরণ)", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = colors.textPrimary)
+                    if (description.isBlank()) {
+                        Text(
+                            text = "লুকান",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = colors.textMuted,
+                            modifier = Modifier.clickable { isMoreWritingExpanded = false }
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    textStyle = customInputTextStyle,
+                    colors = customInputTextFieldColors(),
+                    placeholder = { Text("মাসিক বেতন / বাজার খরচ", fontSize = 14.sp, color = colors.textMuted) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("description_input"),
+                    shape = RoundedCornerShape(10.dp)
+                )
+            }
 
             Spacer(modifier = Modifier.height(12.dp))
 

@@ -4,6 +4,8 @@ import com.example.BuildConfig
 import com.example.data.local.AccountEntity
 import com.example.data.local.BudgetEntity
 import com.example.data.local.LoanEntity
+import com.example.data.local.ReminderEntity
+import com.example.data.local.SavingGoalEntity
 import com.example.data.local.TransactionEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -29,10 +31,27 @@ data class StructuredHisabResult(
     val rawText: String = ""
 )
 
+data class ConversationTurn(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val userPrompt: String,
+    val aiResponse: String,
+    val intentType: String = "UNKNOWN", // "CREATE", "ASK", "ACTION", "INSIGHT"
+    val queryIntent: HisabQueryIntent? = null,
+    val queryResult: HisabQueryResult? = null,
+    val actionResult: StructuredHisabAction? = null,
+    val parsedResult: StructuredHisabResult? = null,
+    val insightsResult: List<SmartInsight>? = null,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
 sealed class HisabAiResult {
     data class Success(val parsed: StructuredHisabResult) : HisabAiResult()
     data class QuerySuccess(val queryResult: HisabQueryResult) : HisabAiResult()
     data class ActionSuccess(val action: StructuredHisabAction) : HisabAiResult()
+    data class InsightsSuccess(val insights: List<SmartInsight>) : HisabAiResult()
+    data class ActionConfirmed(val action: StructuredHisabAction) : HisabAiResult()
+    data class ActionCancelled(val action: StructuredHisabAction? = null) : HisabAiResult()
+    data class ClarificationNeeded(val questionBangla: String, val partialAction: StructuredHisabAction? = null) : HisabAiResult()
     data class Error(val message: String) : HisabAiResult()
 }
 
@@ -54,11 +73,33 @@ object HisabAiManager {
         transactions: List<TransactionEntity> = emptyList(),
         accounts: List<AccountEntity> = emptyList(),
         loans: List<LoanEntity> = emptyList(),
-        budgets: List<BudgetEntity> = emptyList()
+        budgets: List<BudgetEntity> = emptyList(),
+        savingGoals: List<SavingGoalEntity> = emptyList(),
+        reminders: List<ReminderEntity> = emptyList(),
+        conversationHistory: List<ConversationTurn> = emptyList(),
+        pendingAction: StructuredHisabAction? = null,
+        lastQueryIntent: HisabQueryIntent? = null,
+        pendingClarificationContext: String? = null
     ): HisabAiResult = withContext(Dispatchers.IO) {
         val trimmed = userInput.trim()
         if (trimmed.isEmpty()) {
             return@withContext HisabAiResult.Error("প্রশ্নটি বুঝতে পারিনি। যেমন বলতে পারেন: ‘এই মাসে কত খরচ?’")
+        }
+
+        // 1. First priority: Check local conversational state (Confirmation / Cancellation / Clarification reply)
+        val localContextCheck = handleConversationalContextLocally(
+            trimmed = trimmed,
+            transactions = transactions,
+            accounts = accounts,
+            loans = loans,
+            budgets = budgets,
+            conversationHistory = conversationHistory,
+            pendingAction = pendingAction,
+            lastQueryIntent = lastQueryIntent,
+            pendingClarificationContext = pendingClarificationContext
+        )
+        if (localContextCheck != null) {
+            return@withContext localContextCheck
         }
 
         val apiKey = try {
@@ -69,27 +110,51 @@ object HisabAiManager {
 
         // If API key is missing or default placeholder, fallback to local parser
         if (apiKey.isBlank() || apiKey == "MY_GEMINI_API_KEY" || apiKey.contains("YOUR_")) {
-            return@withContext parseLocally(trimmed, transactions, accounts, loans, budgets)
+            return@withContext parseLocally(
+                text = trimmed,
+                transactions = transactions,
+                accounts = accounts,
+                loans = loans,
+                budgets = budgets,
+                savingGoals = savingGoals,
+                reminders = reminders,
+                conversationHistory = conversationHistory,
+                pendingAction = pendingAction,
+                lastQueryIntent = lastQueryIntent,
+                pendingClarificationContext = pendingClarificationContext
+            )
+        }
+
+        // Also check if user asks for insight / analysis directly
+        if (isInsightPrompt(trimmed)) {
+            val insights = HisabInsightEngine.generateInsights(transactions, accounts, loans, budgets, savingGoals, reminders)
+            return@withContext HisabAiResult.InsightsSuccess(insights)
         }
 
         val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US)
         val todayStr = sdf.format(Date())
 
         val systemInstructionText = """
-            You are an expert Bengali financial assistant for 'হিসাব খাতা'.
+            You are an expert Bengali conversational financial assistant for 'হিসাব খাতা'.
+            Maintain context across turns in the conversation.
+            
             Determine if the user's natural Bengali prompt is:
             1. TRANSACTION CREATION ("mode": "CREATE") (e.g. "আজকে ৫০০ টাকার বাজার", "বেতন পেলাম ২৫০০০ টাকা")
-            2. FINANCIAL QUERY/QUESTION ("mode": "ASK") (e.g. "এই মাসে কত খরচ?", "খাবারে কত খরচ হয়েছে?", "রহিমের কাছে কত পাবো?")
-            3. FINANCIAL ACTION/AUTOMATION ("mode": "ACTION") (e.g. "৫০০০ টাকা সঞ্চয়ে দাও", "এই মাসের budget ২০ হাজার করো", "রহিমের কাছে ২০০০ টাকা পাওনা লিখে রাখো", "করিমকে ১০০০ টাকা দিতে হবে, লিখে রাখো", "প্রতি মাসে ৫ তারিখে ৩৫০০ টাকার EMI মনে করিয়ে দিও", "আগামীকাল সকাল ১০টায় আমাকে ২০০০ টাকা দিতে মনে করিয়ে দিও")
+            2. FINANCIAL QUERY/QUESTION ("mode": "ASK") (e.g. "এই মাসে কত খরচ?", "খাবারে কত?", "আর গত মাসের চেয়ে?", "রহিমের কাছে কত পাবো?")
+            3. FINANCIAL ACTION/AUTOMATION ("mode": "ACTION") (e.g. "৫০০০ টাকা সঞ্চয়ে দাও", "এই মাসের budget ২০ হাজার করো", "রহিমের কাছে ২০০০ টাকা পাওনা লিখে রাখো", "করিমকে ১০০০ টাকা দিতে হবে, লিখে রাখো", "প্রতি মাসে ৫ তারিখে ৩৫০০ টাকার EMI মনে করিয়ে দিও")
+            4. ACTION CONFIRMATION/CANCELLATION:
+               - If user agrees ("হ্যাঁ", "হাঁ", "ঠিক আছে", "yes") -> "mode": "CONFIRM"
+               - If user denies ("না", "বাতিল", "no", "cancel") -> "mode": "CANCEL"
+            5. CLARIFICATION NEEDED:
+               - If an action lacks essential details like person name (e.g. "ওকে ৫ হাজার দিয়ে দাও") -> "mode": "CLARIFICATION", "question": "কাকে ৫,০০০ টাকা দিতে হবে?"
 
             Today's Date: $todayStr
-
             Expense Categories: [${EXPENSE_CATEGORIES.joinToString(", ")}]
             Income Categories: [${INCOME_CATEGORIES.joinToString(", ")}]
 
             Rules:
             1. Return ONLY valid JSON with keys:
-               - "mode": "CREATE", "ASK", or "ACTION"
+               - "mode": "CREATE", "ASK", "ACTION", "CONFIRM", "CANCEL", or "CLARIFICATION"
                - If "mode" == "CREATE":
                  - "intent": "CREATE_EXPENSE" or "CREATE_INCOME"
                  - "amount": number
@@ -103,28 +168,51 @@ object HisabAiManager {
                  - "secondary_category": secondary Bengali category string for comparison if applicable, or null
                - If "mode" == "ACTION":
                  - "action": Choose from ["CREATE_SAVING_GOAL", "CREATE_BUDGET", "CREATE_RECEIVABLE", "CREATE_PAYABLE", "CREATE_EMI", "CREATE_REMINDER"]
-                 - "amount": number or null (if user didn't specify amount for EMI, leave null)
-                 - "title": Bengali title string (e.g. "সঞ্চয়", "নতুন ফোন", "EMI", or reminder title)
-                 - "person": person's name string for receivable/payable (e.g. "রহিম", "করিম")
+                 - "amount": number or null
+                 - "title": Bengali title string
+                 - "person": person's name string
                  - "category": category string for budget if specific, or null
                  - "period": "CURRENT_MONTH"
                  - "due_day": integer day of month for EMI (e.g. 5)
                  - "recurrence": "MONTHLY" or "ONCE"
-                 - "date": date string (e.g. "আগামীকাল", "আজ", "YYYY-MM-DD")
-                 - "time": time string (e.g. "10:00", "সকাল ১০:০০")
+                 - "date": date string
+                 - "time": time string
+               - If "mode" == "CLARIFICATION":
+                 - "question": Bengali question asking for missing information
 
-            2. DO NOT output code block fences or explanations. Return strictly valid JSON.
+            2. Context Awareness:
+               - If previous query was about "THIS_MONTH" total expense, and user asks "খাবারে কত?", understand it as category "খাবার" for "THIS_MONTH".
+               - If user then asks "আর গত মাসের চেয়ে?", understand it as comparing "খাবার" expense between THIS_MONTH and PREVIOUS_MONTH.
+
+            3. DO NOT output code block fences or explanations. Return strictly valid JSON.
         """.trimIndent()
 
         val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=$apiKey"
+
+        val contentsArray = JSONArray()
+        // Add recent conversation history for multi-turn understanding
+        val recentTurns = conversationHistory.takeLast(4)
+        for (turn in recentTurns) {
+            contentsArray.put(JSONObject().apply {
+                put("role", "user")
+                put("parts", JSONArray().put(JSONObject().put("text", turn.userPrompt)))
+            })
+            contentsArray.put(JSONObject().apply {
+                put("role", "model")
+                put("parts", JSONArray().put(JSONObject().put("text", turn.aiResponse)))
+            })
+        }
+        // Current user prompt
+        contentsArray.put(JSONObject().apply {
+            put("role", "user")
+            put("parts", JSONArray().put(JSONObject().put("text", trimmed)))
+        })
 
         val requestJson = JSONObject().apply {
             put("systemInstruction", JSONObject().apply {
                 put("parts", JSONArray().put(JSONObject().put("text", systemInstructionText)))
             })
-            put("contents", JSONArray().put(JSONObject().apply {
-                put("parts", JSONArray().put(JSONObject().put("text", trimmed)))
-            }))
+            put("contents", contentsArray)
             put("generationConfig", JSONObject().apply {
                 put("responseMimeType", "application/json")
                 put("temperature", 0.1)
@@ -140,7 +228,19 @@ object HisabAiManager {
 
             val response = httpClient.newCall(request).execute()
             if (!response.isSuccessful) {
-                return@withContext parseLocally(trimmed, transactions, accounts, loans, budgets)
+                return@withContext parseLocally(
+                    text = trimmed,
+                    transactions = transactions,
+                    accounts = accounts,
+                    loans = loans,
+                    budgets = budgets,
+                    savingGoals = savingGoals,
+                    reminders = reminders,
+                    conversationHistory = conversationHistory,
+                    pendingAction = pendingAction,
+                    lastQueryIntent = lastQueryIntent,
+                    pendingClarificationContext = pendingClarificationContext
+                )
             }
 
             val responseStr = response.body?.string() ?: ""
@@ -156,65 +256,89 @@ object HisabAiManager {
 
             val mode = parsedObj.optString("mode", "UNKNOWN")
 
-            if (mode == "ACTION") {
-                val action = HisabActionEngine.parseActionFromJson(parsedObj, trimmed)
-                if (action.action != "UNKNOWN") {
-                    return@withContext HisabAiResult.ActionSuccess(action)
-                } else {
-                    return@withContext parseLocally(trimmed, transactions, accounts, loans, budgets)
+            when (mode) {
+                "CONFIRM" -> {
+                    if (pendingAction != null) {
+                        return@withContext HisabAiResult.ActionConfirmed(pendingAction)
+                    }
                 }
-            } else if (mode == "ASK") {
-                val intentName = parsedObj.optString("intent", "TOTAL_EXPENSE")
-                val dateRange = parsedObj.optString("date_range", "THIS_MONTH")
-                val category = if (parsedObj.has("category") && !parsedObj.isNull("category")) parsedObj.optString("category") else null
-                val secondaryCategory = if (parsedObj.has("secondary_category") && !parsedObj.isNull("secondary_category")) parsedObj.optString("secondary_category") else null
-
-                val queryIntent = HisabQueryIntent(
-                    intent = intentName,
-                    dateRange = dateRange,
-                    category = category,
-                    secondaryCategory = secondaryCategory,
-                    rawText = trimmed
-                )
-
-                val queryResult = HisabQueryEngine.executeQuery(
-                    queryIntent = queryIntent,
-                    transactions = transactions,
-                    accounts = accounts,
-                    loans = loans,
-                    budgets = budgets
-                )
-
-                return@withContext HisabAiResult.QuerySuccess(queryResult)
-            } else {
-                val intent = parsedObj.optString("intent", "UNKNOWN")
-                val amount = if (parsedObj.has("amount") && !parsedObj.isNull("amount")) parsedObj.optDouble("amount") else null
-                val category = if (parsedObj.has("category") && !parsedObj.isNull("category")) parsedObj.optString("category") else null
-                val date = if (parsedObj.has("date") && !parsedObj.isNull("date")) parsedObj.optString("date") else todayStr
-                val note = if (parsedObj.has("note") && !parsedObj.isNull("note")) parsedObj.optString("note") else trimmed
-                val confidence = parsedObj.optDouble("confidence", 0.9).toFloat()
-
-                if (intent == "UNKNOWN" || amount == null || amount <= 0) {
-                    return@withContext parseLocally(trimmed, transactions, accounts, loans, budgets)
+                "CANCEL" -> {
+                    return@withContext HisabAiResult.ActionCancelled(pendingAction)
                 }
+                "CLARIFICATION" -> {
+                    val question = parsedObj.optString("question", "অতিরিক্ত তথ্য প্রয়োজন। স্পষ্ট করে বলুন।")
+                    return@withContext HisabAiResult.ClarificationNeeded(question)
+                }
+                "ACTION" -> {
+                    val action = HisabActionEngine.parseActionFromJson(parsedObj, trimmed)
+                    if (action.action != "UNKNOWN") {
+                        if (action.requiresClarification) {
+                            return@withContext HisabAiResult.ClarificationNeeded("কাকে টাকা দিতে বা কার কাছে পাওনা যোগ করতে চান? ব্যক্তির নাম বলুন।", action)
+                        }
+                        return@withContext HisabAiResult.ActionSuccess(action)
+                    } else {
+                        return@withContext parseLocally(trimmed, transactions, accounts, loans, budgets, savingGoals, reminders, conversationHistory, pendingAction, lastQueryIntent, pendingClarificationContext)
+                    }
+                }
+                "ASK" -> {
+                    val intentName = parsedObj.optString("intent", "TOTAL_EXPENSE")
+                    val dateRange = parsedObj.optString("date_range", "THIS_MONTH")
+                    val category = if (parsedObj.has("category") && !parsedObj.isNull("category")) parsedObj.optString("category") else null
+                    val secondaryCategory = if (parsedObj.has("secondary_category") && !parsedObj.isNull("secondary_category")) parsedObj.optString("secondary_category") else null
 
-                val mappedCategory = matchCategory(category, intent)
+                    val effectiveLastIntent = conversationHistory.lastOrNull { it.queryIntent != null }?.queryIntent ?: lastQueryIntent
+                    val effectiveCategory = category ?: effectiveLastIntent?.category
 
-                return@withContext HisabAiResult.Success(
-                    StructuredHisabResult(
-                        intent = intent,
-                        amount = amount,
-                        category = mappedCategory,
-                        dateString = date,
-                        note = note,
-                        confidence = confidence,
+                    val queryIntent = HisabQueryIntent(
+                        intent = intentName,
+                        dateRange = dateRange,
+                        category = effectiveCategory,
+                        secondaryCategory = secondaryCategory,
                         rawText = trimmed
                     )
-                )
+
+                    val queryResult = HisabQueryEngine.executeQuery(
+                        queryIntent = queryIntent,
+                        transactions = transactions,
+                        accounts = accounts,
+                        loans = loans,
+                        budgets = budgets
+                    )
+
+                    return@withContext HisabAiResult.QuerySuccess(queryResult)
+                }
+                else -> {
+                    val intent = parsedObj.optString("intent", "UNKNOWN")
+                    val amount = if (parsedObj.has("amount") && !parsedObj.isNull("amount")) parsedObj.optDouble("amount") else null
+                    val category = if (parsedObj.has("category") && !parsedObj.isNull("category")) parsedObj.optString("category") else null
+                    val date = if (parsedObj.has("date") && !parsedObj.isNull("date")) parsedObj.optString("date") else todayStr
+                    val note = if (parsedObj.has("note") && !parsedObj.isNull("note")) parsedObj.optString("note") else trimmed
+                    val confidence = parsedObj.optDouble("confidence", 0.9).toFloat()
+
+                    if (intent == "UNKNOWN" || amount == null || amount <= 0) {
+                        return@withContext parseLocally(trimmed, transactions, accounts, loans, budgets, savingGoals, reminders, conversationHistory, pendingAction, lastQueryIntent, pendingClarificationContext)
+                    }
+
+                    val mappedCategory = matchCategory(category, intent)
+
+                    return@withContext HisabAiResult.Success(
+                        StructuredHisabResult(
+                            intent = intent,
+                            amount = amount,
+                            category = mappedCategory,
+                            dateString = date,
+                            note = note,
+                            confidence = confidence,
+                            rawText = trimmed
+                        )
+                    )
+                }
             }
 
+            return@withContext parseLocally(trimmed, transactions, accounts, loans, budgets, savingGoals, reminders, conversationHistory, pendingAction, lastQueryIntent, pendingClarificationContext)
+
         } catch (e: Exception) {
-            return@withContext parseLocally(trimmed, transactions, accounts, loans, budgets)
+            return@withContext parseLocally(trimmed, transactions, accounts, loans, budgets, savingGoals, reminders, conversationHistory, pendingAction, lastQueryIntent, pendingClarificationContext)
         }
     }
 
@@ -241,25 +365,199 @@ object HisabAiManager {
         }
     }
 
+    fun handleConversationalContextLocally(
+        trimmed: String,
+        transactions: List<TransactionEntity> = emptyList(),
+        accounts: List<AccountEntity> = emptyList(),
+        loans: List<LoanEntity> = emptyList(),
+        budgets: List<BudgetEntity> = emptyList(),
+        conversationHistory: List<ConversationTurn> = emptyList(),
+        pendingAction: StructuredHisabAction? = null,
+        lastQueryIntent: HisabQueryIntent? = null,
+        pendingClarificationContext: String? = null
+    ): HisabAiResult? {
+        val lower = trimmed.lowercase()
+
+        // 1. Pending Action Confirmation / Cancellation
+        if (pendingAction != null) {
+            val isYes = lower in listOf("হ্যাঁ", "হ্যা", "হাঁ", "হুম", "ঠিক আছে", "যোগ করো", "করো", "yes", "confirm", "হাঁ করো", "নিশ্চিত", "রাখো", "সেভ করো", "হ্যাঁ করো", "করুন", "ঠিক") ||
+                    lower.startsWith("হ্যাঁ") || lower.startsWith("হাঁ") || lower.startsWith("ঠিক আছে") || lower.startsWith("যোগ করো") || lower.startsWith("confirm")
+            if (isYes) {
+                return HisabAiResult.ActionConfirmed(pendingAction)
+            }
+
+            val isNo = lower in listOf("না", "না থাক", "বাতিল", "ক্যানসেল", "দরকার নেই", "বাদ দাও", "no", "cancel", "করব না", "না করো না", "থাক") ||
+                    lower.startsWith("না") || lower.startsWith("বাতিল") || lower.startsWith("cancel")
+            if (isNo) {
+                return HisabAiResult.ActionCancelled(pendingAction)
+            }
+        }
+
+        // 2. Pending Clarification (Missing Person name resolution)
+        if (pendingClarificationContext != null || (pendingAction != null && pendingAction.requiresClarification)) {
+            val personCandidate = extractPersonFromReply(trimmed)
+            if (personCandidate.isNotBlank()) {
+                val baseAction = pendingAction ?: StructuredHisabAction(
+                    action = "CREATE_PAYABLE",
+                    amount = extractAmountFromBengaliText(pendingClarificationContext ?: "") ?: 5000.0,
+                    person = personCandidate,
+                    clarificationQuestion = null
+                )
+                val resolvedAction = baseAction.copy(
+                    person = personCandidate,
+                    clarificationQuestion = null,
+                    rawText = "${baseAction.rawText} ($personCandidate)"
+                )
+                return HisabAiResult.ActionSuccess(resolvedAction)
+            }
+        }
+
+        // 3. Conversational Query Follow-ups
+        val effectiveLastQuery = conversationHistory.lastOrNull { it.queryIntent != null }?.queryIntent ?: lastQueryIntent
+        if (effectiveLastQuery != null) {
+            // Check for Month comparison follow-up (e.g. "আর গত মাসের চেয়ে?", "গত মাসের চেয়ে?", "বেশি নাকি?", "তুলনা করো")
+            val isComparisonFollowup = lower.contains("তুলনা") || lower.contains("চেয়ে") || lower.contains("তুলনায়") ||
+                    lower.contains("বেশি নাকি") || lower.contains("কম নাকি") || lower.contains("পার্থক্য") || lower.contains("আগের মাস")
+            if (isComparisonFollowup) {
+                val followQueryIntent = if (!effectiveLastQuery.category.isNullOrEmpty()) {
+                    HisabQueryIntent(
+                        intent = "CATEGORY_COMPARISON",
+                        dateRange = "THIS_MONTH",
+                        category = effectiveLastQuery.category,
+                        rawText = trimmed
+                    )
+                } else {
+                    HisabQueryIntent(
+                        intent = "MONTH_COMPARISON",
+                        dateRange = "THIS_MONTH",
+                        rawText = trimmed
+                    )
+                }
+                val queryResult = HisabQueryEngine.executeQuery(followQueryIntent, transactions, accounts, loans, budgets)
+                return HisabAiResult.QuerySuccess(queryResult)
+            }
+
+            // Check for Category follow-up (e.g. "খাবারে কত?", "খাবারে?", "বাজারে কত?", "যাতায়াতে?")
+            val category = extractCategoryName(lower)
+            val isCategoryFollowup = category != null && (lower.length <= 25 || lower.contains("কত") || lower.contains("কী অবস্থা") || lower.endsWith("?"))
+            if (isCategoryFollowup && category != null) {
+                val followQueryIntent = HisabQueryIntent(
+                    intent = "EXPENSE_BY_CATEGORY",
+                    dateRange = effectiveLastQuery.dateRange,
+                    category = category,
+                    rawText = trimmed
+                )
+                val queryResult = HisabQueryEngine.executeQuery(followQueryIntent, transactions, accounts, loans, budgets)
+                return HisabAiResult.QuerySuccess(queryResult)
+            }
+
+            // Check for Income follow-up (e.g. "আয় কত?", "আয় কত হয়েছে?")
+            if (lower.contains("আয় কত") || lower == "আয়?" || lower == "আয় কত") {
+                val followQueryIntent = HisabQueryIntent(
+                    intent = "TOTAL_INCOME",
+                    dateRange = effectiveLastQuery.dateRange,
+                    rawText = trimmed
+                )
+                val queryResult = HisabQueryEngine.executeQuery(followQueryIntent, transactions, accounts, loans, budgets)
+                return HisabAiResult.QuerySuccess(queryResult)
+            }
+
+            // Check for Top Expense follow-up (e.g. "সবচেয়ে বেশি কোনটাতে?", "কোথায় বেশি খরচ?")
+            if (lower.contains("সবচেয়ে বেশি") || lower.contains("সর্বোচ্চ") || lower.contains("বেশি খরচ কোথায়")) {
+                val followQueryIntent = HisabQueryIntent(
+                    intent = "TOP_EXPENSE_CATEGORY",
+                    dateRange = effectiveLastQuery.dateRange,
+                    rawText = trimmed
+                )
+                val queryResult = HisabQueryEngine.executeQuery(followQueryIntent, transactions, accounts, loans, budgets)
+                return HisabAiResult.QuerySuccess(queryResult)
+            }
+
+            // Check for Big Transactions follow-up (e.g. "বড় খরচ কোনগুলো?", "বড় লেনদেন")
+            if (lower.contains("বড় খরচ") || lower.contains("বড় লেনদেন")) {
+                val followQueryIntent = HisabQueryIntent(
+                    intent = "TOP_EXPENSE_TRANSACTIONS",
+                    dateRange = effectiveLastQuery.dateRange,
+                    rawText = trimmed
+                )
+                val queryResult = HisabQueryEngine.executeQuery(followQueryIntent, transactions, accounts, loans, budgets)
+                return HisabAiResult.QuerySuccess(queryResult)
+            }
+        }
+
+        return null
+    }
+
+    private fun extractPersonFromReply(text: String): String {
+        var clean = text.trim()
+            .removeSuffix("কে")
+            .removeSuffix(" এর")
+            .removeSuffix("এর")
+            .trim()
+        val removeWords = listOf("হিসাবে", "নামে", "দাও", "করো", "টাকা", "লিখে", "রাখো")
+        for (w in removeWords) {
+            clean = clean.replace(w, "").trim()
+        }
+        return clean
+    }
+
     fun parseLocally(
         text: String,
         transactions: List<TransactionEntity> = emptyList(),
         accounts: List<AccountEntity> = emptyList(),
         loans: List<LoanEntity> = emptyList(),
-        budgets: List<BudgetEntity> = emptyList()
+        budgets: List<BudgetEntity> = emptyList(),
+        savingGoals: List<SavingGoalEntity> = emptyList(),
+        reminders: List<ReminderEntity> = emptyList(),
+        conversationHistory: List<ConversationTurn> = emptyList(),
+        pendingAction: StructuredHisabAction? = null,
+        lastQueryIntent: HisabQueryIntent? = null,
+        pendingClarificationContext: String? = null
     ): HisabAiResult {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) {
             return HisabAiResult.Error("প্রশ্নটি বুঝতে পারিনি। যেমন বলতে পারেন: ‘এই মাসে কত খরচ?’ বা ‘৫০০০ টাকা সঞ্চয়ে দাও’")
         }
 
-        // 1. Check for Action / Automation first
+        // 1. Check conversational context first
+        val contextResult = handleConversationalContextLocally(
+            trimmed = trimmed,
+            transactions = transactions,
+            accounts = accounts,
+            loans = loans,
+            budgets = budgets,
+            conversationHistory = conversationHistory,
+            pendingAction = pendingAction,
+            lastQueryIntent = lastQueryIntent,
+            pendingClarificationContext = pendingClarificationContext
+        )
+        if (contextResult != null) {
+            return contextResult
+        }
+
+        // 2. Check for Action / Automation
         val localAction = HisabActionEngine.parseActionLocally(trimmed)
         if (localAction != null && localAction.action != "UNKNOWN") {
+            if (localAction.requiresClarification) {
+                return HisabAiResult.ClarificationNeeded("কাকে টাকা দিতে বা কার কাছে পাওনা যোগ করতে চান? ব্যক্তির নাম বলুন।", localAction)
+            }
             return HisabAiResult.ActionSuccess(localAction)
         }
 
-        // 2. Check for Financial Query
+        // 3. Check for Smart Financial Insight / Analysis
+        if (isInsightPrompt(trimmed)) {
+            val insights = HisabInsightEngine.generateInsights(
+                transactions = transactions,
+                accounts = accounts,
+                loans = loans,
+                budgets = budgets,
+                savingGoals = savingGoals,
+                reminders = reminders
+            )
+            return HisabAiResult.InsightsSuccess(insights)
+        }
+
+        // 4. Check for Financial Query
         val isQuestion = isQueryPrompt(trimmed)
         if (isQuestion) {
             val queryIntent = extractQueryIntentFromText(trimmed)
@@ -272,7 +570,7 @@ object HisabAiManager {
             )
             return HisabAiResult.QuerySuccess(queryResult)
         } else {
-            // 3. Fallback to Transaction Creation
+            // 5. Fallback to Transaction Creation
             val localParsed = parseCreateTransactionLocally(trimmed)
             return if (localParsed != null && localParsed.amount != null && localParsed.amount > 0) {
                 HisabAiResult.Success(localParsed)
@@ -280,6 +578,14 @@ object HisabAiManager {
                 HisabAiResult.Error("প্রশ্নটি বুঝতে পারিনি। যেমন বলতে পারেন: ‘এই মাসে কত খরচ?’ বা ‘আজকে ৫০০ টাকার বাজার’ বা ‘৫০০০ টাকা সঞ্চয়ে দাও’")
             }
         }
+    }
+
+    private fun isInsightPrompt(text: String): Boolean {
+        val lower = text.lowercase()
+        return lower.contains("বিশ্লেষণ") || lower.contains("ইনসাইট") || lower.contains("insight") ||
+                lower.contains("সতর্কতা") || lower.contains("পরামর্শ") || lower.contains("আর্থিক অবস্থা") ||
+                lower.contains("আর্থিক রিপোর্ট") || lower.contains("অ্যানালাইসিস") || lower.contains("analysis") ||
+                lower.contains("ধারাবাহিক") || lower.contains("অস্বাভাবিক")
     }
 
     private fun isQueryPrompt(text: String): Boolean {

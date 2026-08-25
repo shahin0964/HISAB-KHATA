@@ -26,6 +26,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.ai.InsightPriority
+import com.example.data.ai.SmartInsight
 import com.example.data.local.TransactionEntity
 import com.example.ui.components.EmptyStateView
 import com.example.ui.components.ThreeDQuickActionTile
@@ -51,6 +53,7 @@ fun HomeScreen(
     onAddIncomeClick: () -> Unit,
     onAddExpenseClick: () -> Unit,
     onHisabAiClick: (() -> Unit)? = null,
+    insights: List<SmartInsight> = emptyList(),
     modifier: Modifier = Modifier
 ) {
     val colors = LocalAppColors.current
@@ -250,23 +253,25 @@ fun HomeScreen(
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Surface(
-                                        color = PrimaryBlue.copy(alpha = 0.15f),
+                                        color = if (insights.any { it.priority == InsightPriority.CRITICAL }) ExpenseRed.copy(alpha = 0.15f) else PrimaryBlue.copy(alpha = 0.15f),
                                         shape = RoundedCornerShape(4.dp)
                                     ) {
                                         Text(
-                                            text = "স্মার্ট",
+                                            text = if (insights.any { it.priority == InsightPriority.CRITICAL }) "⚠️ সতর্কতা" else if (insights.isNotEmpty()) "💡 অন্তর্দৃষ্টি" else "স্মার্ট",
                                             fontSize = 10.sp,
                                             fontWeight = FontWeight.Bold,
-                                            color = PrimaryBlue,
+                                            color = if (insights.any { it.priority == InsightPriority.CRITICAL }) ExpenseRed else PrimaryBlue,
                                             modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                                         )
                                     }
                                 }
                                 Spacer(modifier = Modifier.height(2.dp))
+                                val topInsight = insights.firstOrNull()
                                 Text(
-                                    text = "বাংলায় কথা বলুন বা টাইপ করে হিসাব রাখুন",
+                                    text = topInsight?.messageBangla ?: "বাংলায় কথা বলুন বা টাইপ করে হিসাব রাখুন",
                                     fontSize = 12.sp,
-                                    color = colors.textMuted,
+                                    color = if (topInsight?.priority == InsightPriority.CRITICAL) ExpenseRed else colors.textMuted,
+                                    fontWeight = if (topInsight?.priority == InsightPriority.CRITICAL) FontWeight.SemiBold else FontWeight.Normal,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )

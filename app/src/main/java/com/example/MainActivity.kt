@@ -67,12 +67,21 @@ fun HisabKhataApp(viewModel: HisabViewModel = viewModel()) {
 
     val totalLent by viewModel.totalLent.collectAsStateWithLifecycle()
     val totalOwed by viewModel.totalOwed.collectAsStateWithLifecycle()
+    val savingGoals by viewModel.savingGoals.collectAsStateWithLifecycle()
+    val reminders by viewModel.reminders.collectAsStateWithLifecycle()
+    val smartInsights by viewModel.smartInsights.collectAsStateWithLifecycle()
     val pendingSyncCount by viewModel.pendingSyncCount.collectAsStateWithLifecycle()
     val isSyncing by viewModel.isSyncing.collectAsStateWithLifecycle()
 
     LaunchedEffect(Unit) {
         viewModel.uiEvent.collect { message ->
             Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    LaunchedEffect(smartInsights) {
+        if (smartInsights.isNotEmpty()) {
+            viewModel.checkAndNotifyProactiveInsights()
         }
     }
 
@@ -112,7 +121,9 @@ fun HisabKhataApp(viewModel: HisabViewModel = viewModel()) {
             transactions = transactions,
             accounts = accounts,
             loans = loans,
-            budgets = budgets
+            budgets = budgets,
+            savingGoals = savingGoals,
+            reminders = reminders
         )
     }
 
@@ -380,6 +391,7 @@ fun HisabKhataApp(viewModel: HisabViewModel = viewModel()) {
                     onHisabAiClick = {
                         if (isGuestMode) viewModel.triggerGuestRestriction() else showHisabAiDialog = true
                     },
+                    insights = smartInsights,
                     modifier = Modifier.padding(padding)
                 )
             }

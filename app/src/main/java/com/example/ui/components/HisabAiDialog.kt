@@ -7,8 +7,13 @@ import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -22,11 +27,16 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.HelpOutline
+import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicNone
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -39,16 +49,23 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.example.data.ai.ConversationTurn
 import com.example.data.ai.HisabActionEngine
 import com.example.data.ai.HisabAiManager
 import com.example.data.ai.HisabAiResult
+import com.example.data.ai.HisabInsightEngine
 import com.example.data.ai.HisabQueryResult
 import com.example.data.ai.HisabQueryEngine
+import com.example.data.ai.HisabQueryIntent
+import com.example.data.ai.InsightPriority
+import com.example.data.ai.SmartInsight
 import com.example.data.ai.StructuredHisabAction
 import com.example.data.ai.StructuredHisabResult
 import com.example.data.local.AccountEntity
 import com.example.data.local.BudgetEntity
 import com.example.data.local.LoanEntity
+import com.example.data.local.ReminderEntity
+import com.example.data.local.SavingGoalEntity
 import com.example.data.local.TransactionEntity
 import com.example.ui.theme.ExpenseRed
 import com.example.ui.theme.IncomeGreen
@@ -80,21 +97,46 @@ fun HisabAiDialog(
     transactions: List<TransactionEntity> = emptyList(),
     accounts: List<AccountEntity> = emptyList(),
     loans: List<LoanEntity> = emptyList(),
-    budgets: List<BudgetEntity> = emptyList()
+    budgets: List<BudgetEntity> = emptyList(),
+    savingGoals: List<SavingGoalEntity> = emptyList(),
+    reminders: List<ReminderEntity> = emptyList(),
+    initialTab: String = "CHAT"
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val colors = LocalAppColors.current
 
+    var activeTab by remember { mutableStateOf(initialTab) } // "CHAT" or "INSIGHTS"
     var inputText by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
     var isListening by remember { mutableStateOf(false) }
+    var isSpeaking by remember { mutableStateOf(false) }
+    var isTtsReady by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var parsedResult by remember { mutableStateOf<StructuredHisabResult?>(null) }
     var queryResult by remember { mutableStateOf<HisabQueryResult?>(null) }
     var actionResult by remember { mutableStateOf<StructuredHisabAction?>(null) }
+    var smartInsightsResult by remember { mutableStateOf<List<SmartInsight>?>(null) }
     var actionSuccessMessage by remember { mutableStateOf<String?>(null) }
     var isSaving by remember { mutableStateOf(false) }
+
+    // Conversational Context State (Step 5 Voice Agent)
+    var conversationHistory by remember { mutableStateOf<List<ConversationTurn>>(emptyList()) }
+    var pendingActionState by remember { mutableStateOf<StructuredHisabAction?>(null) }
+    var lastQueryIntentState by remember { mutableStateOf<HisabQueryIntent?>(null) }
+    var pendingClarificationContextState by remember { mutableStateOf<String?>(null) }
+
+    // Dynamic real-time insights calculated locally
+    val dynamicInsights = remember(transactions, accounts, loans, budgets, savingGoals, reminders) {
+        HisabInsightEngine.generateInsights(
+            transactions = transactions,
+            accounts = accounts,
+            loans = loans,
+            budgets = budgets,
+            savingGoals = savingGoals,
+            reminders = reminders
+        )
+    }
 
     // Confirmation fields (editable for transaction creation)
     var confirmType by remember { mutableStateOf("EXPENSE") }
@@ -104,6 +146,70 @@ fun HisabAiDialog(
     var confirmNote by remember { mutableStateOf("") }
     var confirmAccount by remember { mutableStateOf("ক্যাশ") }
     var categoryDropdownExpanded by remember { mutableStateOf(false) }
+
+    // TTS Setup
+    var ttsInstance by remember { mutableStateOf<TextToSpeech?>(null) }
+
+    DisposableEffect(context) {
+        var textToSpeech: TextToSpeech? = null
+        try {
+            textToSpeech = TextToSpeech(context) { status ->
+                if (status == TextToSpeech.SUCCESS) {
+                    val result = textToSpeech?.setLanguage(Locale("bn", "BD"))
+                    if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                        textToSpeech?.setLanguage(Locale.getDefault())
+                    }
+                    isTtsReady = true
+                }
+            }
+            textToSpeech.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {
+                    isSpeaking = true
+                }
+                override fun onDone(utteranceId: String?) {
+                    isSpeaking = false
+                }
+                override fun onError(utteranceId: String?) {
+                    isSpeaking = false
+                }
+            })
+            ttsInstance = textToSpeech
+        } catch (e: Exception) {
+            isTtsReady = false
+        }
+
+        onDispose {
+            try {
+                textToSpeech?.stop()
+                textToSpeech?.shutdown()
+            } catch (e: Exception) {
+                // ignore
+            }
+        }
+    }
+
+    fun stopSpeaking() {
+        try {
+            ttsInstance?.stop()
+            isSpeaking = false
+        } catch (e: Exception) {
+            isSpeaking = false
+        }
+    }
+
+    fun speakBangla(text: String) {
+        if (isTtsReady && ttsInstance != null) {
+            try {
+                if (isListening) {
+                    isListening = false
+                }
+                ttsInstance?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "HISAB_AI_VOICE_AGENT")
+                isSpeaking = true
+            } catch (e: Exception) {
+                isSpeaking = false
+            }
+        }
+    }
 
     // Speech recognizer setup
     val speechRecognizer = remember { SpeechRecognizer.createSpeechRecognizer(context) }
@@ -118,10 +224,186 @@ fun HisabAiDialog(
         }
     }
 
+    fun triggerProcessInput(textToProcess: String) {
+        val trimmed = textToProcess.trim()
+        if (trimmed.isBlank() || isLoading || isSaving) return
+        stopSpeaking()
+        isLoading = true
+        errorMessage = null
+        actionSuccessMessage = null
+
+        scope.launch {
+            val result = HisabAiManager.parsePrompt(
+                userInput = trimmed,
+                transactions = transactions,
+                accounts = accounts,
+                loans = loans,
+                budgets = budgets,
+                savingGoals = savingGoals,
+                reminders = reminders,
+                conversationHistory = conversationHistory,
+                pendingAction = pendingActionState,
+                lastQueryIntent = lastQueryIntentState,
+                pendingClarificationContext = pendingClarificationContextState
+            )
+            isLoading = false
+            when (result) {
+                is HisabAiResult.Success -> {
+                    val p = result.parsed
+                    confirmType = if (p.intent == "CREATE_INCOME") "INCOME" else "EXPENSE"
+                    confirmAmountText = p.amount?.let { if (it % 1.0 == 0.0) it.toLong().toString() else it.toString() } ?: ""
+                    confirmCategory = p.category ?: ""
+                    confirmDate = p.dateString ?: SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+                    confirmNote = p.note ?: trimmed
+                    parsedResult = p
+                    queryResult = null
+                    actionResult = null
+                    smartInsightsResult = null
+                    pendingActionState = null
+                    pendingClarificationContextState = null
+                    activeTab = "CHAT"
+
+                    val spokenPrompt = "${p.amount?.toLong() ?: ""} টাকা ${p.category ?: ""} হিসাব যোগ করতে চান? মিলিয়ে নিশ্চিত করুন।"
+                    speakBangla(spokenPrompt)
+
+                    conversationHistory = conversationHistory + ConversationTurn(
+                        userPrompt = trimmed,
+                        aiResponse = spokenPrompt,
+                        intentType = "CREATE",
+                        parsedResult = p
+                    )
+                }
+                is HisabAiResult.QuerySuccess -> {
+                    val q = result.queryResult
+                    queryResult = q
+                    lastQueryIntentState = q.queryIntent
+                    parsedResult = null
+                    actionResult = null
+                    smartInsightsResult = null
+                    pendingActionState = null
+                    pendingClarificationContextState = null
+                    activeTab = "CHAT"
+
+                    speakBangla(q.answerBangla)
+
+                    conversationHistory = conversationHistory + ConversationTurn(
+                        userPrompt = trimmed,
+                        aiResponse = q.answerBangla,
+                        intentType = "ASK",
+                        queryIntent = q.queryIntent,
+                        queryResult = q
+                    )
+                }
+                is HisabAiResult.ActionSuccess -> {
+                    val act = result.action
+                    actionResult = act
+                    pendingActionState = act
+                    pendingClarificationContextState = null
+                    parsedResult = null
+                    queryResult = null
+                    smartInsightsResult = null
+                    activeTab = "CHAT"
+
+                    speakBangla(act.confirmationPromptBangla)
+
+                    conversationHistory = conversationHistory + ConversationTurn(
+                        userPrompt = trimmed,
+                        aiResponse = act.confirmationPromptBangla,
+                        intentType = "ACTION",
+                        actionResult = act
+                    )
+                }
+                is HisabAiResult.ActionConfirmed -> {
+                    val act = result.action
+                    if (onConfirmAction != null) {
+                        isSaving = true
+                        onConfirmAction(
+                            act,
+                            { successMsg ->
+                                isSaving = false
+                                actionSuccessMessage = successMsg
+                                actionResult = null
+                                pendingActionState = null
+                                pendingClarificationContextState = null
+                                speakBangla(successMsg)
+
+                                conversationHistory = conversationHistory + ConversationTurn(
+                                    userPrompt = trimmed,
+                                    aiResponse = successMsg,
+                                    intentType = "ACTION_CONFIRMED"
+                                )
+                            },
+                            { errorMsg ->
+                                isSaving = false
+                                errorMessage = errorMsg
+                                speakBangla("সমস্যা হয়েছে: $errorMsg")
+                            }
+                        )
+                    } else {
+                        actionResult = null
+                        pendingActionState = null
+                    }
+                }
+                is HisabAiResult.ActionCancelled -> {
+                    actionResult = null
+                    pendingActionState = null
+                    pendingClarificationContextState = null
+                    val cancelMsg = "কমান্ডটি বাতিল করা হয়েছে।"
+                    errorMessage = null
+                    actionSuccessMessage = cancelMsg
+                    speakBangla(cancelMsg)
+
+                    conversationHistory = conversationHistory + ConversationTurn(
+                        userPrompt = trimmed,
+                        aiResponse = cancelMsg,
+                        intentType = "ACTION_CANCELLED"
+                    )
+                }
+                is HisabAiResult.ClarificationNeeded -> {
+                    val question = result.questionBangla
+                    errorMessage = question
+                    pendingActionState = result.partialAction
+                    pendingClarificationContextState = trimmed
+                    speakBangla(question)
+
+                    conversationHistory = conversationHistory + ConversationTurn(
+                        userPrompt = trimmed,
+                        aiResponse = question,
+                        intentType = "CLARIFICATION"
+                    )
+                }
+                is HisabAiResult.InsightsSuccess -> {
+                    smartInsightsResult = result.insights
+                    parsedResult = null
+                    queryResult = null
+                    actionResult = null
+                    pendingActionState = null
+                    pendingClarificationContextState = null
+                    activeTab = "INSIGHTS"
+
+                    val insightMsg = "আপনার আর্থিক হিসাবের স্মার্ট বিশ্লেষণ তৈরি করা হয়েছে।"
+                    speakBangla(insightMsg)
+
+                    conversationHistory = conversationHistory + ConversationTurn(
+                        userPrompt = trimmed,
+                        aiResponse = insightMsg,
+                        intentType = "INSIGHT",
+                        insightsResult = result.insights
+                    )
+                }
+                is HisabAiResult.Error -> {
+                    errorMessage = result.message
+                    speakBangla(result.message)
+                }
+            }
+        }
+    }
+
     val recordAudioPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
+            stopSpeaking()
             startSpeechToText(
                 context = context,
                 speechRecognizer = speechRecognizer,
@@ -129,6 +411,7 @@ fun HisabAiDialog(
                 onTextRecognized = { recognizedText ->
                     inputText = recognizedText
                     errorMessage = null
+                    triggerProcessInput(recognizedText)
                 },
                 onError = { err ->
                     errorMessage = err
@@ -140,14 +423,16 @@ fun HisabAiDialog(
     }
 
     fun handleMicClick() {
-        if (isLoading || isSaving) return
+        stopSpeaking()
         val permissionCheck = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
         if (permissionCheck == PackageManager.PERMISSION_GRANTED) {
             if (isListening) {
                 try {
                     speechRecognizer.stopListening()
-                } catch (e: Exception) {}
-                isListening = false
+                    isListening = false
+                } catch (e: Exception) {
+                    // ignore
+                }
             } else {
                 startSpeechToText(
                     context = context,
@@ -156,6 +441,7 @@ fun HisabAiDialog(
                     onTextRecognized = { recognizedText ->
                         inputText = recognizedText
                         errorMessage = null
+                        triggerProcessInput(recognizedText)
                     },
                     onError = { err ->
                         errorMessage = err
@@ -168,47 +454,7 @@ fun HisabAiDialog(
     }
 
     fun processInput() {
-        if (inputText.isBlank() || isLoading || isSaving) return
-        isLoading = true
-        errorMessage = null
-        actionSuccessMessage = null
-
-        scope.launch {
-            val result = HisabAiManager.parsePrompt(
-                userInput = inputText,
-                transactions = transactions,
-                accounts = accounts,
-                loans = loans,
-                budgets = budgets
-            )
-            isLoading = false
-            when (result) {
-                is HisabAiResult.Success -> {
-                    val p = result.parsed
-                    confirmType = if (p.intent == "CREATE_INCOME") "INCOME" else "EXPENSE"
-                    confirmAmountText = p.amount?.let { if (it % 1.0 == 0.0) it.toLong().toString() else it.toString() } ?: ""
-                    confirmCategory = p.category ?: ""
-                    confirmDate = p.dateString ?: SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
-                    confirmNote = p.note ?: inputText
-                    parsedResult = p
-                    queryResult = null
-                    actionResult = null
-                }
-                is HisabAiResult.QuerySuccess -> {
-                    queryResult = result.queryResult
-                    parsedResult = null
-                    actionResult = null
-                }
-                is HisabAiResult.ActionSuccess -> {
-                    actionResult = result.action
-                    parsedResult = null
-                    queryResult = null
-                }
-                is HisabAiResult.Error -> {
-                    errorMessage = result.message
-                }
-            }
-        }
+        triggerProcessInput(inputText)
     }
 
     AlertDialog(
@@ -218,43 +464,132 @@ fun HisabAiDialog(
         containerColor = colors.dialogBackground,
         shape = RoundedCornerShape(18.dp),
         title = {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(32.dp)
-                            .background(PrimaryBlue.copy(alpha = 0.15f), CircleShape),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.AutoAwesome,
-                            contentDescription = "AI",
-                            tint = PrimaryBlue,
-                            modifier = Modifier.size(18.dp)
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .background(PrimaryBlue.copy(alpha = 0.15f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AutoAwesome,
+                                contentDescription = "AI",
+                                tint = PrimaryBlue,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "হিসাব AI",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = colors.textPrimary
                         )
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "হিসাব AI",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = colors.textPrimary
-                    )
+                    IconButton(
+                        onClick = { if (!isLoading && !isSaving) onDismissRequest() },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "বন্ধ করুন",
+                            tint = colors.textMuted,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                 }
-                IconButton(
-                    onClick = { if (!isLoading && !isSaving) onDismissRequest() },
-                    modifier = Modifier.size(28.dp)
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                AnimatedVisibility(visible = isSpeaking) {
+                    Surface(
+                        color = PrimaryBlue.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { stopSpeaking() }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.VolumeUp,
+                                    contentDescription = "Speaking",
+                                    tint = PrimaryBlue,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "হিসাব AI কথা বলছে...",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = PrimaryBlue
+                                )
+                            }
+                            Text(
+                                text = "থামাতে ট্যাপ করুন",
+                                fontSize = 11.sp,
+                                color = colors.textMuted
+                            )
+                        }
+                    }
+                }
+
+                // Navigation tabs: AI Chat / Voice vs Smart Insights
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(colors.inputBackground, RoundedCornerShape(10.dp))
+                        .padding(3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "বন্ধ করুন",
-                        tint = colors.textMuted,
-                        modifier = Modifier.size(20.dp)
-                    )
+                    val isChatSelected = activeTab == "CHAT"
+                    Button(
+                        onClick = { activeTab = "CHAT" },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(34.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isChatSelected) PrimaryBlue else Color.Transparent,
+                            contentColor = if (isChatSelected) Color.White else colors.textMuted
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                        elevation = if (isChatSelected) ButtonDefaults.buttonElevation(defaultElevation = 2.dp) else ButtonDefaults.buttonElevation(0.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Send, contentDescription = null, modifier = Modifier.size(13.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("AI কমান্ড", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+
+                    val isInsightsSelected = activeTab == "INSIGHTS"
+                    val count = (smartInsightsResult ?: dynamicInsights).size
+                    Button(
+                        onClick = { activeTab = "INSIGHTS" },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(34.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isInsightsSelected) PrimaryBlue else Color.Transparent,
+                            contentColor = if (isInsightsSelected) Color.White else colors.textMuted
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                        elevation = if (isInsightsSelected) ButtonDefaults.buttonElevation(defaultElevation = 2.dp) else ButtonDefaults.buttonElevation(0.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Lightbulb, contentDescription = null, modifier = Modifier.size(13.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(if (count > 0) "স্মার্ট অন্তর্দৃষ্টি ($count)" else "স্মার্ট অন্তর্দৃষ্টি", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
                 }
             }
         },
@@ -265,7 +600,76 @@ fun HisabAiDialog(
                     .padding(top = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                if (actionSuccessMessage != null) {
+                if (activeTab == "INSIGHTS") {
+                    // Render Smart Financial Insights
+                    val displayedInsights = smartInsightsResult ?: dynamicInsights
+
+                    if (displayedInsights.isEmpty()) {
+                        Surface(
+                            color = PrimaryBlue.copy(alpha = 0.08f),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(16.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Lightbulb,
+                                    contentDescription = null,
+                                    tint = PrimaryBlue,
+                                    modifier = Modifier.size(32.dp)
+                                )
+                                Text(
+                                    text = "কোনো অস্বাভাবিক খরচ বা ঝুঁকি নেই",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = colors.textPrimary
+                                )
+                                Text(
+                                    text = "আপনার আর্থিক হিসাব চমৎকার গতিতে চলছে। লেনদেন নিয়মিত যোগ করতে থাকুন, নতুন কোনো ট্রেন্ড বা বাজেট সীমা পাওয়া গেলে সাথে সাথে এখানে জানানো হবে।",
+                                    fontSize = 12.sp,
+                                    color = colors.textMuted,
+                                    lineHeight = 16.sp
+                                )
+                            }
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 380.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            items(displayedInsights, key = { it.id }) { insight ->
+                                SmartInsightItemCard(insight = insight, colors = colors)
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                activeTab = "CHAT"
+                                inputText = "আমার আর্থিক বিশ্লেষণ দেখাও"
+                                processInput()
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(40.dp),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("AI বিশ্লেষণ রিফ্রেশ", fontSize = 12.sp)
+                        }
+                    }
+
+                } else if (actionSuccessMessage != null) {
                     // Action Success View
                     Surface(
                         color = IncomeGreen.copy(alpha = 0.1f),
@@ -333,7 +737,11 @@ fun HisabAiDialog(
                             modifier = Modifier.padding(14.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Box(
                                     modifier = Modifier
                                         .background(PrimaryBlue.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
@@ -344,6 +752,20 @@ fun HisabAiDialog(
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = PrimaryBlue
+                                    )
+                                }
+                                IconButton(
+                                    onClick = {
+                                        if (isSpeaking) stopSpeaking()
+                                        else speakBangla(currentAction.confirmationPromptBangla)
+                                    },
+                                    modifier = Modifier.size(24.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (isSpeaking) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                                        contentDescription = "Voice Output",
+                                        tint = PrimaryBlue,
+                                        modifier = Modifier.size(16.dp)
                                     )
                                 }
                             }
@@ -437,6 +859,36 @@ fun HisabAiDialog(
                         }
                     }
 
+                    Surface(
+                        color = PrimaryBlue.copy(alpha = 0.05f),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "🎙️ মুখে ‘হ্যাঁ’ বা ‘না’ বলতে পারেন",
+                                fontSize = 12.sp,
+                                color = PrimaryBlue,
+                                fontWeight = FontWeight.Medium
+                            )
+                            IconButton(
+                                onClick = { handleMicClick() },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (isListening) Icons.Default.Mic else Icons.Default.MicNone,
+                                    contentDescription = "Voice Confirm",
+                                    tint = if (isListening) ExpenseRed else PrimaryBlue,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                    }
+
                     if (currentAction.requiresClarification) {
                         Text(
                             text = "ℹ️ অতিরিক্ত তথ্য প্রয়োজন: যেমন পরিমাণ বা ব্যক্তির নাম স্পষ্ট করুন।",
@@ -470,20 +922,40 @@ fun HisabAiDialog(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(modifier = Modifier.padding(14.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Default.AutoAwesome,
-                                    contentDescription = null,
-                                    tint = PrimaryBlue,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "AI উত্তর",
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = PrimaryBlue
-                                )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.AutoAwesome,
+                                        contentDescription = null,
+                                        tint = PrimaryBlue,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "AI উত্তর",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = PrimaryBlue
+                                    )
+                                }
+                                IconButton(
+                                    onClick = {
+                                        if (isSpeaking) stopSpeaking()
+                                        else speakBangla(queryResult!!.answerBangla)
+                                    },
+                                    modifier = Modifier.size(24.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (isSpeaking) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                                        contentDescription = "Voice Output",
+                                        tint = PrimaryBlue,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
                             }
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
@@ -527,10 +999,52 @@ fun HisabAiDialog(
                         }
                     }
 
+                    // Conversational Follow-up Suggestions
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(text = "পরবর্তী প্রশ্ন (Follow-up):", fontSize = 11.sp, color = colors.textMuted, fontWeight = FontWeight.SemiBold)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            SuggestionChip(
+                                onClick = { triggerProcessInput("খাবারে কত?") },
+                                label = { Text("খাবারে কত?", fontSize = 11.sp) }
+                            )
+                            SuggestionChip(
+                                onClick = { triggerProcessInput("আর গত মাসের চেয়ে?") },
+                                label = { Text("গত মাসের চেয়ে?", fontSize = 11.sp) }
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            SuggestionChip(
+                                onClick = { triggerProcessInput("আমার মোট আয় কত?") },
+                                label = { Text("মোট আয় কত?", fontSize = 11.sp) }
+                            )
+                            SuggestionChip(
+                                onClick = { triggerProcessInput("আর্থিক বিশ্লেষণ দেখাও") },
+                                label = { Text("💡 বিশ্লেষণ দেখাও", fontSize = 11.sp) }
+                            )
+                        }
+                    }
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        OutlinedButton(
+                            onClick = { handleMicClick() },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(40.dp),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Icon(imageVector = if (isListening) Icons.Default.Mic else Icons.Default.MicNone, contentDescription = null, modifier = Modifier.size(16.dp), tint = if (isListening) ExpenseRed else PrimaryBlue)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(if (isListening) "শুনছি..." else "ভয়েসে কথা বলুন", fontSize = 12.sp, color = if (isListening) ExpenseRed else PrimaryBlue)
+                        }
                         OutlinedButton(
                             onClick = {
                                 queryResult = null
@@ -547,7 +1061,7 @@ fun HisabAiDialog(
                         ) {
                             Icon(imageVector = Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("আরেকটি প্রশ্ন", fontSize = 12.sp)
+                            Text("নতুন প্রশ্ন", fontSize = 12.sp)
                         }
                     }
 
@@ -565,7 +1079,7 @@ fun HisabAiDialog(
                             inputText = it
                             if (errorMessage != null) errorMessage = null
                         },
-                        placeholder = { Text("যেমন: ‘৫০০০ টাকা সঞ্চয়ে দাও’ বা ‘এই মাসে কত খরচ?’", fontSize = 12.sp, color = colors.textMuted) },
+                        placeholder = { Text("যেমন: ‘৫০০০ টাকা সঞ্চয়ে দাও’ বা ‘আর্থিক বিশ্লেষণ’", fontSize = 12.sp, color = colors.textMuted) },
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("hisab_ai_input_field"),
@@ -637,18 +1151,21 @@ fun HisabAiDialog(
 
                     // Quick suggestion chips
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(text = "নমুনা কমান্ড ও প্রশ্ন:", fontSize = 11.sp, color = colors.textMuted, fontWeight = FontWeight.SemiBold)
+                        Text(text = "নমুনা কমান্ড ও বিশ্লেষণ:", fontSize = 11.sp, color = colors.textMuted, fontWeight = FontWeight.SemiBold)
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             SuggestionChip(
-                                onClick = { inputText = "৫০০০ টাকা সঞ্চয়ে দাও" },
-                                label = { Text("৫০০০ টাকা সঞ্চয়", fontSize = 11.sp) }
+                                onClick = {
+                                    inputText = "আমার আর্থিক বিশ্লেষণ দেখাও"
+                                    processInput()
+                                },
+                                label = { Text("💡 আর্থিক বিশ্লেষণ", fontSize = 11.sp) }
                             )
                             SuggestionChip(
-                                onClick = { inputText = "এই মাসের budget ২০ হাজার করো" },
-                                label = { Text("২০ হাজার বাজেট", fontSize = 11.sp) }
+                                onClick = { inputText = "৫০০০ টাকা সঞ্চয়ে দাও" },
+                                label = { Text("৫০০০ টাকা সঞ্চয়", fontSize = 11.sp) }
                             )
                         }
                         Row(
@@ -656,8 +1173,8 @@ fun HisabAiDialog(
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             SuggestionChip(
-                                onClick = { inputText = "রহিমের কাছে ২০০০ টাকা পাওনা লিখে রাখো" },
-                                label = { Text("রহিমের পাওনা ২০০০", fontSize = 11.sp) }
+                                onClick = { inputText = "এই মাসের budget ২০ হাজার করো" },
+                                label = { Text("২০ হাজার বাজেট", fontSize = 11.sp) }
                             )
                             SuggestionChip(
                                 onClick = { inputText = "এই মাসে কত খরচ?" },
@@ -699,39 +1216,43 @@ fun HisabAiDialog(
                     ) {
                         Button(
                             onClick = { confirmType = "EXPENSE" },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(36.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = if (confirmType == "EXPENSE") ExpenseRed else Color.Transparent,
                                 contentColor = if (confirmType == "EXPENSE") Color.White else colors.textMuted
                             ),
                             shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.weight(1f),
-                            contentPadding = PaddingValues(vertical = 6.dp)
+                            elevation = null
                         ) {
-                            Text("🔴 খরচ", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            Text("খরচ", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         }
                         Button(
                             onClick = { confirmType = "INCOME" },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(36.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = if (confirmType == "INCOME") IncomeGreen else Color.Transparent,
                                 contentColor = if (confirmType == "INCOME") Color.White else colors.textMuted
                             ),
                             shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.weight(1f),
-                            contentPadding = PaddingValues(vertical = 6.dp)
+                            elevation = null
                         ) {
-                            Text("💚 আয়", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            Text("আয়", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         }
                     }
 
-                    // Amount Input Field
+                    // Amount input
                     OutlinedTextField(
                         value = confirmAmountText,
                         onValueChange = { confirmAmountText = it },
-                        label = { Text("পরিমাণ (৳)") },
+                        label = { Text("টাকার পরিমাণ") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .testTag("hisab_ai_confirm_amount"),
+                            .testTag("hisab_ai_confirm_amount_input"),
                         shape = RoundedCornerShape(10.dp),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = PrimaryBlue,
@@ -741,32 +1262,38 @@ fun HisabAiDialog(
                         )
                     )
 
-                    // Category Selection
-                    val availableCategories = if (confirmType == "INCOME") HisabAiManager.INCOME_CATEGORIES else HisabAiManager.EXPENSE_CATEGORIES
-
-                    Box(modifier = Modifier.fillMaxWidth()) {
+                    // Category Selector
+                    ExposedDropdownMenuBox(
+                        expanded = categoryDropdownExpanded,
+                        onExpandedChange = { categoryDropdownExpanded = !categoryDropdownExpanded }
+                    ) {
                         OutlinedTextField(
-                            value = if (confirmCategory.isBlank()) "কোন category-তে রাখব?" else confirmCategory,
-                            onValueChange = {},
-                            readOnly = true,
+                            value = confirmCategory,
+                            onValueChange = { confirmCategory = it },
                             label = { Text("ক্যাটাগরি") },
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = categoryDropdownExpanded) },
                             modifier = Modifier
+                                .menuAnchor()
                                 .fillMaxWidth()
-                                .clickable { categoryDropdownExpanded = true }
-                                .testTag("hisab_ai_confirm_category"),
-                            enabled = false,
+                                .testTag("hisab_ai_confirm_category_input"),
+                            shape = RoundedCornerShape(10.dp),
                             colors = OutlinedTextFieldDefaults.colors(
-                                disabledTextColor = if (confirmCategory.isBlank()) ExpenseRed else colors.textPrimary,
-                                disabledBorderColor = if (confirmCategory.isBlank()) ExpenseRed else colors.inputBorder,
-                                disabledLabelColor = colors.textMuted
-                            ),
-                            shape = RoundedCornerShape(10.dp)
+                                focusedBorderColor = PrimaryBlue,
+                                unfocusedBorderColor = colors.inputBorder,
+                                focusedTextColor = colors.textPrimary,
+                                unfocusedTextColor = colors.textPrimary
+                            )
                         )
-                        DropdownMenu(
+                        val sampleCategories = if (confirmType == "INCOME") {
+                            listOf("বেতন", "ব্যবসা", "উপহার", "বিনিয়োগ", "ভাড়া", "অন্যান্য")
+                        } else {
+                            listOf("খাবার", "বাজার", "যাতায়াত", "বিল", "কেনাকাটা", "চিকিৎসা", "শিক্ষা", "বিনোদন", "অন্যান্য")
+                        }
+                        ExposedDropdownMenu(
                             expanded = categoryDropdownExpanded,
                             onDismissRequest = { categoryDropdownExpanded = false }
                         ) {
-                            availableCategories.forEach { cat ->
+                            sampleCategories.forEach { cat ->
                                 DropdownMenuItem(
                                     text = { Text(cat) },
                                     onClick = {
@@ -778,23 +1305,52 @@ fun HisabAiDialog(
                         }
                     }
 
-                    if (confirmCategory.isBlank()) {
-                        Text(
-                            text = "«কোন category-তে রাখব?» অনুগ্রহ করে উপরের ক্যাটাগরি নির্বাচন করুন।",
-                            fontSize = 11.sp,
-                            color = ExpenseRed,
-                            fontWeight = FontWeight.Bold
+                    // Account selector
+                    val availableAccounts = accounts.map { it.name }.ifEmpty { listOf("ক্যাশ", "ব্যাংক", "বিকাশ") }
+                    var accountDropdownExpanded by remember { mutableStateOf(false) }
+                    ExposedDropdownMenuBox(
+                        expanded = accountDropdownExpanded,
+                        onExpandedChange = { accountDropdownExpanded = !accountDropdownExpanded }
+                    ) {
+                        OutlinedTextField(
+                            value = confirmAccount,
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("অ্যাকাউন্ট") },
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = accountDropdownExpanded) },
+                            modifier = Modifier
+                                .menuAnchor()
+                                .fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = PrimaryBlue,
+                                unfocusedBorderColor = colors.inputBorder,
+                                focusedTextColor = colors.textPrimary,
+                                unfocusedTextColor = colors.textPrimary
+                            )
                         )
+                        ExposedDropdownMenu(
+                            expanded = accountDropdownExpanded,
+                            onDismissRequest = { accountDropdownExpanded = false }
+                        ) {
+                            availableAccounts.forEach { acc ->
+                                DropdownMenuItem(
+                                    text = { Text(acc) },
+                                    onClick = {
+                                        confirmAccount = acc
+                                        accountDropdownExpanded = false
+                                    }
+                                )
+                            }
+                        }
                     }
 
-                    // Note Field
+                    // Note
                     OutlinedTextField(
                         value = confirmNote,
                         onValueChange = { confirmNote = it },
-                        label = { Text("নোট / বিবরণ") },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("hisab_ai_confirm_note"),
+                        label = { Text("বিবরণ / নোট (ঐচ্ছিক)") },
+                        modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(10.dp),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = PrimaryBlue,
@@ -922,6 +1478,139 @@ fun HisabAiDialog(
             }
         }
     )
+}
+
+@Composable
+private fun SmartInsightItemCard(
+    insight: SmartInsight,
+    colors: com.example.ui.theme.AppColors
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    val (badgeBg, badgeTextColor, priorityLabel) = when (insight.priority) {
+        InsightPriority.CRITICAL -> Triple(ExpenseRed.copy(alpha = 0.12f), ExpenseRed, "সতর্কতা")
+        InsightPriority.HIGH -> Triple(Color(0xFFEA580C).copy(alpha = 0.12f), Color(0xFFEA580C), "জরুরি")
+        InsightPriority.MEDIUM -> Triple(PrimaryBlue.copy(alpha = 0.12f), PrimaryBlue, "পরামর্শ")
+        InsightPriority.LOW -> Triple(PrimaryBlue.copy(alpha = 0.08f), PrimaryBlue, "তথ্য")
+        InsightPriority.INFO -> Triple(IncomeGreen.copy(alpha = 0.12f), IncomeGreen, "তথ্য")
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (colors.isBlack) Color(0xFF1E293B) else Color(0xFFF8FAFC)
+        ),
+        border = androidx.compose.foundation.BorderStroke(
+            width = 1.dp,
+            color = if (insight.priority == InsightPriority.CRITICAL) ExpenseRed.copy(alpha = 0.3f) else colors.inputBorder
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .background(badgeBg, RoundedCornerShape(4.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = priorityLabel,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = badgeTextColor
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = insight.title,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = colors.textPrimary
+                    )
+                }
+
+                if (insight.breakdownItems.isNotEmpty()) {
+                    IconButton(
+                        onClick = { expanded = !expanded },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            contentDescription = if (expanded) "কম দেখুন" else "বিস্তারিত দেখুন",
+                            tint = colors.textMuted,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+
+            Text(
+                text = insight.messageBangla,
+                fontSize = 13.sp,
+                color = colors.textPrimary,
+                lineHeight = 18.sp
+            )
+
+            if (!insight.actionSuggestionBangla.isNullOrBlank()) {
+                Surface(
+                    color = PrimaryBlue.copy(alpha = 0.08f),
+                    shape = RoundedCornerShape(6.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Lightbulb,
+                            contentDescription = null,
+                            tint = PrimaryBlue,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = insight.actionSuggestionBangla,
+                            fontSize = 11.sp,
+                            color = PrimaryBlue,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+
+            if (expanded && insight.breakdownItems.isNotEmpty()) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = colors.inputBorder.copy(alpha = 0.5f))
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    insight.breakdownItems.forEach { item ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = item.first,
+                                fontSize = 12.sp,
+                                color = colors.textMuted
+                            )
+                            Text(
+                                text = HisabQueryEngine.formatBanglaCurrency(item.second),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = colors.textPrimary
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 private fun formatConfirmedDate(dateInput: String): String {
