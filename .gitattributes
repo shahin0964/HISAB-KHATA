@@ -1,2 +1,3 @@
-# Prevent Git from modifying binary files like JARs
-*.jar binary
+# Prevent Git from modifying binary files like JARs and Keystores
+*.jar binary -text -diff
+*.jks binary -text -diff
