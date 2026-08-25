@@ -35,12 +35,15 @@ data class ConversationTurn(
     val id: String = java.util.UUID.randomUUID().toString(),
     val userPrompt: String,
     val aiResponse: String,
-    val intentType: String = "UNKNOWN", // "CREATE", "ASK", "ACTION", "INSIGHT"
+    val intentType: String = "UNKNOWN", // "CREATE", "ASK", "ACTION", "INSIGHT", "FORECAST"
     val queryIntent: HisabQueryIntent? = null,
     val queryResult: HisabQueryResult? = null,
     val actionResult: StructuredHisabAction? = null,
     val parsedResult: StructuredHisabResult? = null,
     val insightsResult: List<SmartInsight>? = null,
+    val forecastResult: FinancialForecastResult? = null,
+    val debtSummaryResult: DebtSummaryResult? = null,
+    val coachResult: BudgetSavingsCoachResult? = null,
     val timestamp: Long = System.currentTimeMillis()
 )
 
@@ -49,6 +52,9 @@ sealed class HisabAiResult {
     data class QuerySuccess(val queryResult: HisabQueryResult) : HisabAiResult()
     data class ActionSuccess(val action: StructuredHisabAction) : HisabAiResult()
     data class InsightsSuccess(val insights: List<SmartInsight>) : HisabAiResult()
+    data class ForecastSuccess(val forecast: FinancialForecastResult) : HisabAiResult()
+    data class DebtSummarySuccess(val debtSummary: DebtSummaryResult, val spokenAnswerBangla: String) : HisabAiResult()
+    data class CoachSuccess(val coachResult: BudgetSavingsCoachResult, val spokenAnswerBangla: String) : HisabAiResult()
     data class ActionConfirmed(val action: StructuredHisabAction) : HisabAiResult()
     data class ActionCancelled(val action: StructuredHisabAction? = null) : HisabAiResult()
     data class ClarificationNeeded(val questionBangla: String, val partialAction: StructuredHisabAction? = null) : HisabAiResult()
@@ -125,10 +131,50 @@ object HisabAiManager {
             )
         }
 
+        // Also check if user asks for forecast / projection directly
+        if (isForecastPrompt(trimmed)) {
+            val forecast = HisabForecastEngine.generateForecast(transactions, accounts, loans, budgets, savingGoals, reminders)
+            return@withContext HisabAiResult.ForecastSuccess(forecast)
+        }
+
         // Also check if user asks for insight / analysis directly
         if (isInsightPrompt(trimmed)) {
             val insights = HisabInsightEngine.generateInsights(transactions, accounts, loans, budgets, savingGoals, reminders)
             return@withContext HisabAiResult.InsightsSuccess(insights)
+        }
+
+        // Also check if user asks for Debt / EMI / Payment inquiries directly
+        if (isDebtManagerPrompt(trimmed)) {
+            val debtSummary = HisabDebtManagerEngine.generateDebtSummary(
+                loans = loans,
+                reminders = reminders,
+                accounts = accounts,
+                transactions = transactions,
+                budgets = budgets
+            )
+            val answer = HisabDebtManagerEngine.answerDebtQuery(
+                queryText = trimmed,
+                loans = loans,
+                reminders = reminders
+            )
+            return@withContext HisabAiResult.DebtSummarySuccess(debtSummary, answer)
+        }
+
+        // Also check if user asks for Budget & Savings Coach directly
+        if (isCoachPrompt(trimmed)) {
+            val coachResult = HisabBudgetSavingsCoachEngine.generateCoachReport(
+                transactions = transactions,
+                budgets = budgets,
+                savingGoals = savingGoals,
+                accounts = accounts,
+                loans = loans,
+                reminders = reminders
+            )
+            val answer = HisabBudgetSavingsCoachEngine.answerCoachQuery(
+                queryText = trimmed,
+                coachResult = coachResult
+            )
+            return@withContext HisabAiResult.CoachSuccess(coachResult, answer)
         }
 
         val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US)
@@ -140,12 +186,15 @@ object HisabAiManager {
             
             Determine if the user's natural Bengali prompt is:
             1. TRANSACTION CREATION ("mode": "CREATE") (e.g. "আজকে ৫০০ টাকার বাজার", "বেতন পেলাম ২৫০০০ টাকা")
-            2. FINANCIAL QUERY/QUESTION ("mode": "ASK") (e.g. "এই মাসে কত খরচ?", "খাবারে কত?", "আর গত মাসের চেয়ে?", "রহিমের কাছে কত পাবো?")
+            2. FINANCIAL QUERY/QUESTION ("mode": "ASK") (e.g. "এই মাসে কত খরচ?", "খাবারে কত?", "আর গত মাসের চেয়ে?")
             3. FINANCIAL ACTION/AUTOMATION ("mode": "ACTION") (e.g. "৫০০০ টাকা সঞ্চয়ে দাও", "এই মাসের budget ২০ হাজার করো", "রহিমের কাছে ২০০০ টাকা পাওনা লিখে রাখো", "করিমকে ১০০০ টাকা দিতে হবে, লিখে রাখো", "প্রতি মাসে ৫ তারিখে ৩৫০০ টাকার EMI মনে করিয়ে দিও")
-            4. ACTION CONFIRMATION/CANCELLATION:
+            4. FINANCIAL FORECAST/PROJECTION ("mode": "FORECAST") (e.g. "মাস শেষে কত খরচ হতে পারে?", "আমার budget শেষ হয়ে যাবে?", "মাস শেষে হাতে কত টাকা থাকতে পারে?", "আমার saving goal কবে পূরণ হতে পারে?", "খরচের পূর্বাভাস দেখাও")
+            5. DEBT, EMI & PAYMENT INQUIRY ("mode": "DEBT_MANAGER") (e.g. "আমার কত টাকা দিতে হবে?", "কার কাছে আমার টাকা পাওনা?", "এই সপ্তাহে কত টাকা দিতে হবে?", "আমার কোন EMI আগে?", "কোন টাকা overdue?", "সবচেয়ে জরুরি payment কোনটা?", "সব পাওনা বলো", "আমার মোট দেনা কত?")
+            6. BUDGET & SAVINGS COACH ("mode": "COACH") (e.g. "আমার budget কেমন চলছে?", "এই মাসে প্রতিদিন কত খরচ করতে পারি?", "নিরাপদ দৈনিক খরচ কত?", "আমার সঞ্চয়ের goal কতদূর?", "Goal পূরণ করতে কত টাকা জমাতে হবে?", "আমি কি এই মাসে বেশি খরচ করছি?", "আমার saving ঠিকমতো হচ্ছে?", "Budget আর saving মিলিয়ে আমার অবস্থা কেমন?", "আর্থিক কোচিং দাও")
+            7. ACTION CONFIRMATION/CANCELLATION:
                - If user agrees ("হ্যাঁ", "হাঁ", "ঠিক আছে", "yes") -> "mode": "CONFIRM"
                - If user denies ("না", "বাতিল", "no", "cancel") -> "mode": "CANCEL"
-            5. CLARIFICATION NEEDED:
+            8. CLARIFICATION NEEDED:
                - If an action lacks essential details like person name (e.g. "ওকে ৫ হাজার দিয়ে দাও") -> "mode": "CLARIFICATION", "question": "কাকে ৫,০০০ টাকা দিতে হবে?"
 
             Today's Date: $todayStr
@@ -154,7 +203,7 @@ object HisabAiManager {
 
             Rules:
             1. Return ONLY valid JSON with keys:
-               - "mode": "CREATE", "ASK", "ACTION", "CONFIRM", "CANCEL", or "CLARIFICATION"
+               - "mode": "CREATE", "ASK", "ACTION", "FORECAST", "DEBT_MANAGER", "COACH", "CONFIRM", "CANCEL", or "CLARIFICATION"
                - If "mode" == "CREATE":
                  - "intent": "CREATE_EXPENSE" or "CREATE_INCOME"
                  - "amount": number
@@ -279,6 +328,47 @@ object HisabAiManager {
                     } else {
                         return@withContext parseLocally(trimmed, transactions, accounts, loans, budgets, savingGoals, reminders, conversationHistory, pendingAction, lastQueryIntent, pendingClarificationContext)
                     }
+                }
+                "FORECAST" -> {
+                    val forecast = HisabForecastEngine.generateForecast(
+                        transactions = transactions,
+                        accounts = accounts,
+                        loans = loans,
+                        budgets = budgets,
+                        savingGoals = savingGoals,
+                        reminders = reminders
+                    )
+                    return@withContext HisabAiResult.ForecastSuccess(forecast)
+                }
+                "DEBT_MANAGER" -> {
+                    val debtSummary = HisabDebtManagerEngine.generateDebtSummary(
+                        loans = loans,
+                        reminders = reminders,
+                        accounts = accounts,
+                        transactions = transactions,
+                        budgets = budgets
+                    )
+                    val answer = HisabDebtManagerEngine.answerDebtQuery(
+                        queryText = trimmed,
+                        loans = loans,
+                        reminders = reminders
+                    )
+                    return@withContext HisabAiResult.DebtSummarySuccess(debtSummary, answer)
+                }
+                "COACH" -> {
+                    val coachResult = HisabBudgetSavingsCoachEngine.generateCoachReport(
+                        transactions = transactions,
+                        budgets = budgets,
+                        savingGoals = savingGoals,
+                        accounts = accounts,
+                        loans = loans,
+                        reminders = reminders
+                    )
+                    val answer = HisabBudgetSavingsCoachEngine.answerCoachQuery(
+                        queryText = trimmed,
+                        coachResult = coachResult
+                    )
+                    return@withContext HisabAiResult.CoachSuccess(coachResult, answer)
                 }
                 "ASK" -> {
                     val intentName = parsedObj.optString("intent", "TOTAL_EXPENSE")
@@ -544,7 +634,20 @@ object HisabAiManager {
             return HisabAiResult.ActionSuccess(localAction)
         }
 
-        // 3. Check for Smart Financial Insight / Analysis
+        // 3. Check for Financial Forecast / Projection
+        if (isForecastPrompt(trimmed)) {
+            val forecast = HisabForecastEngine.generateForecast(
+                transactions = transactions,
+                accounts = accounts,
+                loans = loans,
+                budgets = budgets,
+                savingGoals = savingGoals,
+                reminders = reminders
+            )
+            return HisabAiResult.ForecastSuccess(forecast)
+        }
+
+        // 4. Check for Smart Financial Insight / Analysis
         if (isInsightPrompt(trimmed)) {
             val insights = HisabInsightEngine.generateInsights(
                 transactions = transactions,
@@ -557,7 +660,41 @@ object HisabAiManager {
             return HisabAiResult.InsightsSuccess(insights)
         }
 
-        // 4. Check for Financial Query
+        // 5. Check for Debt / EMI / Payment Manager Inquiry
+        if (isDebtManagerPrompt(trimmed)) {
+            val debtSummary = HisabDebtManagerEngine.generateDebtSummary(
+                loans = loans,
+                reminders = reminders,
+                accounts = accounts,
+                transactions = transactions,
+                budgets = budgets
+            )
+            val answer = HisabDebtManagerEngine.answerDebtQuery(
+                queryText = trimmed,
+                loans = loans,
+                reminders = reminders
+            )
+            return HisabAiResult.DebtSummarySuccess(debtSummary, answer)
+        }
+
+        // 6. Check for Budget & Savings Coach Inquiry
+        if (isCoachPrompt(trimmed)) {
+            val coachResult = HisabBudgetSavingsCoachEngine.generateCoachReport(
+                transactions = transactions,
+                budgets = budgets,
+                savingGoals = savingGoals,
+                accounts = accounts,
+                loans = loans,
+                reminders = reminders
+            )
+            val answer = HisabBudgetSavingsCoachEngine.answerCoachQuery(
+                queryText = trimmed,
+                coachResult = coachResult
+            )
+            return HisabAiResult.CoachSuccess(coachResult, answer)
+        }
+
+        // 7. Check for Financial Query
         val isQuestion = isQueryPrompt(trimmed)
         if (isQuestion) {
             val queryIntent = extractQueryIntentFromText(trimmed)
@@ -570,7 +707,7 @@ object HisabAiManager {
             )
             return HisabAiResult.QuerySuccess(queryResult)
         } else {
-            // 5. Fallback to Transaction Creation
+            // 8. Fallback to Transaction Creation
             val localParsed = parseCreateTransactionLocally(trimmed)
             return if (localParsed != null && localParsed.amount != null && localParsed.amount > 0) {
                 HisabAiResult.Success(localParsed)
@@ -578,6 +715,47 @@ object HisabAiManager {
                 HisabAiResult.Error("প্রশ্নটি বুঝতে পারিনি। যেমন বলতে পারেন: ‘এই মাসে কত খরচ?’ বা ‘আজকে ৫০০ টাকার বাজার’ বা ‘৫০০০ টাকা সঞ্চয়ে দাও’")
             }
         }
+    }
+
+    fun isCoachPrompt(text: String): Boolean {
+        val lower = text.lowercase()
+        return lower.contains("কোচ") || lower.contains("coach") ||
+                lower.contains("নিরাপদ খরচ") || lower.contains("প্রতিদিন কত খরচ") || lower.contains("প্রতিদিন কত") ||
+                lower.contains("দৈনিক কত") || lower.contains("দৈনিক বাজেট") || lower.contains("daily budget") ||
+                lower.contains("safe daily") || lower.contains("daily allowance") ||
+                (lower.contains("budget") && (lower.contains("কেমন") || lower.contains("চলছে") || lower.contains("অবস্থা") || lower.contains("ঠিক আছে"))) ||
+                (lower.contains("বাজেট") && (lower.contains("কেমন") || lower.contains("চলছে") || lower.contains("অবস্থা") || lower.contains("ঠিক আছে"))) ||
+                (lower.contains("সঞ্চয়") && (lower.contains("কতদূর") || lower.contains("কত বাকি") || lower.contains("কত জমাতে") || lower.contains("ঠিকমতো") || lower.contains("গতি"))) ||
+                (lower.contains("goal") && (lower.contains("কতদূর") || lower.contains("কত বাকি") || lower.contains("how far") || lower.contains("progress"))) ||
+                lower.contains("লক্ষ্য কতদূর") || lower.contains("লক্ষ্য পূরণ") || lower.contains("কত টাকা জমাতে হবে") || lower.contains("কত জমাতে হবে") ||
+                lower.contains("বেশি খরচ করছি") || lower.contains("বেশি খরচ হচ্ছে") ||
+                (lower.contains("বাজেট") && lower.contains("সঞ্চয়")) || (lower.contains("budget") && lower.contains("saving"))
+    }
+
+    fun isDebtManagerPrompt(text: String): Boolean {
+        val lower = text.lowercase()
+        return lower.contains("দেনা") || lower.contains("পাওনা") || lower.contains("পাবো") || lower.contains("দিতে হবে") ||
+                lower.contains("emi") || lower.contains("ইএমআই") || lower.contains("কিস্তি") || lower.contains("ডিপিএস") ||
+                lower.contains("overdue") || lower.contains("ওভারডিউ") || lower.contains("মেয়াদ শেষ") || lower.contains("মেয়াদোত্তীর্ণ") ||
+                lower.contains("বকেয়া") || lower.contains("সব পাওনা") || lower.contains("মোট দেনা") ||
+                (lower.contains("পেমেন্ট") && !lower.contains("পেলাম")) || (lower.contains("payment") && !lower.contains("received")) ||
+                (lower.contains("ধার") && (lower.contains("কত") || lower.contains("আছে") || lower.contains("কার") || lower.contains("বলো") || lower.contains("বাকি") || lower.contains("লিস্ট"))) ||
+                (lower.contains("ঋণ") && (lower.contains("কত") || lower.contains("আছে") || lower.contains("পরিশোধ") || lower.contains("বাকি"))) ||
+                lower.contains("জরুরি দেনা") || lower.contains("জরুরি payment") || lower.contains("আগে দিতে হবে") ||
+                lower.contains("কোন payment আগে") || lower.contains("এই সপ্তাহে কত টাকা দিতে হবে") || lower.contains("আগামীকাল কাকে")
+    }
+
+    fun isForecastPrompt(text: String): Boolean {
+        val lower = text.lowercase()
+        return lower.contains("পূর্বাভাস") || lower.contains("forecast") || lower.contains("প্রজেকশন") ||
+                lower.contains("হতে পারে") || lower.contains("থাকতে পারে") || lower.contains("যাবে কি") ||
+                lower.contains("শেষ হয়ে যাবে") || lower.contains("কবে পূরণ") || lower.contains("মাস শেষে কত") ||
+                lower.contains("মাস শেষে আনুমানিক") || lower.contains("ভবিষ্যত") || lower.contains("সম্ভাব্য") ||
+                lower.contains("খরচের গতি") || lower.contains("খরচ হবে কেমন") ||
+                (lower.contains("বাজেট") && (lower.contains("শেষ") || lower.contains("ছাড়িয়ে") || lower.contains("থাকবে কি") || lower.contains("অতিরিক্ত"))) ||
+                (lower.contains("budget") && (lower.contains("finish") || lower.contains("exceed") || lower.contains("over"))) ||
+                (lower.contains("সঞ্চয়") && (lower.contains("কবে") || lower.contains("কতদিন"))) ||
+                (lower.contains("goal") && (lower.contains("when") || lower.contains("reach")))
     }
 
     private fun isInsightPrompt(text: String): Boolean {
