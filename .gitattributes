@@ -1,0 +1,2 @@
+# Prevent Git from modifying binary files like JARs
+*.jar binary
