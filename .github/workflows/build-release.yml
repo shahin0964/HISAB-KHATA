@@ -41,7 +41,8 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          validate-wrappers: false
+          wrapper-validation: false
+          allow-wrapper-checksums: 'a5e75118d96b4eac2100876f6af6a5ca5029cd440f87736425350fb4cf308b42'
           cache-disabled: true
 
       - name: Diagnostic: After Setup-Gradle
